@@ -12,11 +12,26 @@ if not exist "%USERPROFILE%\iCloudDrive" (
 
 :: Define the base iCloudDrive path
 set "iCloudDrivePath=%USERPROFILE%\iCloudDrive"
+set "backupFile=%~dp0iCloudFoldersBackup.reg"
 
 echo.
 echo ================================
 echo Setting up iCloud Drive Folders
 echo ================================
+
+:: Create backup of current registry settings
+echo Creating registry backup...
+reg export "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders" "%backupFile%" /y
+echo Registry backup created: %backupFile%
+
+:: Create restore script
+(
+echo @echo off
+echo reg import "%backupFile%"
+echo echo Registry settings restored.
+echo pause
+) > "%~dp0RestoreRegistry.bat"
+echo Restore script created: "%~dp0RestoreRegistry.bat"
 
 :: Create the folders
 echo Creating folders...
@@ -106,12 +121,13 @@ echo Set registry key for Videos (again) to: %iCloudDrivePath%\Videos
 
 echo.
 echo All folders created and registry keys set successfully. Please restart your computer for changes to take effect.
+echo To restore the original registry settings, run the RestoreRegistry.bat file.
 echo.
 pause
 
 :: Script: iCloud Folders Redirector
-:: Version: 1.1
+:: Version: 1.2
 :: Author: Sviatoslav Nikitin
-:: Description: Redirects Windows user folders to iCloud Drive
+:: Description: Redirects Windows user folders to iCloud Drive and creates a backup of original settings
 :: Compatibility: Windows 10/11
 :: Requires: Administrator Privileges, iCloud for Windows installed
