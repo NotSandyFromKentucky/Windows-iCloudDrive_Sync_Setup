@@ -1,6 +1,15 @@
 @echo off
 setlocal enabledelayedexpansion
 
+:: Check if iCloud Drive is installed
+if not exist "%USERPROFILE%\iCloudDrive" (
+    echo Error: iCloud Drive folder not found in %USERPROFILE%
+    echo Please ensure that iCloud for Windows is installed and set up correctly.
+    echo.
+    pause
+    exit /b 1
+)
+
 :: Define the base iCloudDrive path
 set "iCloudDrivePath=%USERPROFILE%\iCloudDrive"
 
@@ -99,3 +108,10 @@ echo.
 echo All folders created and registry keys set successfully. Please restart your computer for changes to take effect.
 echo.
 pause
+
+:: Script: iCloud Folders Redirector
+:: Version: 1.1
+:: Author: Sviatoslav Nikitin
+:: Description: Redirects Windows user folders to iCloud Drive
+:: Compatibility: Windows 10/11
+:: Requires: Administrator Privileges, iCloud for Windows installed
