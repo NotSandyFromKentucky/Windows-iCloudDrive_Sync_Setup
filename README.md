@@ -1,2 +1,2 @@
 # Windows-iCloudDrive_Sync_Setup
-Redirecting standard windows folders to ICloud Drive for easy syncing 
+This simple .bat file will create windows personal folders ()
