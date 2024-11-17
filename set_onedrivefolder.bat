@@ -127,7 +127,7 @@ pause
 
 :: Script: iCloud Folders Redirector
 :: Version: 1.2
-:: Author: Sviatoslav Nikitin
+:: Author: Sviatoslav
 :: Description: Redirects Windows user folders to iCloud Drive and creates a backup of original settings
 :: Compatibility: Windows 10/11
 :: Requires: Administrator Privileges, iCloud for Windows installed
