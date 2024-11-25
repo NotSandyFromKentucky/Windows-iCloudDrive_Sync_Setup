@@ -13,7 +13,7 @@ This simple .bat file will create windows personal folders (Desktop, Documents, 
 ## Download
 Download archive from release https://github.com/NotSandyFromKentucky/Windows-iCloudDrive_Sync_Setup/releases/tag/Release
 
-# OR
+### OR
 
 Copy file set_onedrivefolder.bat from https://github.com/NotSandyFromKentucky/Windows-iCloudDrive_Sync_Setup/blob/6f6f01653080d0669771d5feb4988c24688ab2c0/set_onedrivefolder.bat and save locally.
 
