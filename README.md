@@ -1,6 +1,6 @@
 # Windows-iCloudDrive_Sync_Setup
 This simple .bat file will create windows personal folders (Desktop, Documents, Pictures, Videos, Downloads) to your iCloud drive folder on windows.
-
+That way, you will be able to link personal folders (Desktop, Documents, Pictures, Videos, Downloads) in Icloud, and files in those folders will be accessible across all your iDevices and in iCloud web.
 ## This script:
 - Verifies iCloud Drive installation by checking for the iCloud folder in the current user's directory
 - Automatically creates necessary folders in iCloud Drive
