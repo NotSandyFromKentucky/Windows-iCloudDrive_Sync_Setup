@@ -4,12 +4,13 @@ param([Parameter(Mandatory)][string]$Archive, [Parameter(Mandatory)][ValidatePat
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path $PSScriptRoot -Parent
 $null = Get-Command gh -ErrorAction Stop
-& (Join-Path $PSScriptRoot 'Test-ReleasePackage.ps1') -Archive $Archive
+$verifiedPackage = & (Join-Path $PSScriptRoot 'Test-ReleasePackage.ps1') -Archive $Archive -PassThru
 $version = (Get-Content -LiteralPath (Join-Path $repo 'VERSION') -Raw).Trim()
 $tag = 'v' + $version
 $tagCommit = & git -C $repo rev-parse ($tag + '^{commit}')
 $headCommit = & git -C $repo rev-parse HEAD
 if ($LASTEXITCODE -ne 0 -or $tagCommit -cne $headCommit) { throw 'The version tag must exist and point to the checked-out commit.' }
+if ($verifiedPackage.Commit -cne $headCommit -or $verifiedPackage.Version -cne $version) { throw 'The archive was built from a different commit or version; rebuild before publishing.' }
 $notes = Get-Content -LiteralPath (Join-Path $repo 'CHANGELOG.md') -Raw
 $pattern = '(?ms)^## v' + [regex]::Escape($version) + '\s*\r?\n(.*?)(?=^## |\z)'
 if ($notes -notmatch $pattern) { throw 'Changelog section for this version is missing.' }

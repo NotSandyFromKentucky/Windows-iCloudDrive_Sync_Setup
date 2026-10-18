@@ -78,6 +78,7 @@ jobs:
         run: |
           $package = ./tools/New-ReleasePackage.ps1
           ./tools/Test-ReleasePackage.ps1 -Archive $package.Archive
+          ./tests/Test-ReleaseTools.ps1
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: verified-package

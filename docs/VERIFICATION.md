@@ -18,7 +18,19 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Diagnostics
 
 The core tests use an in-memory registry boundary and isolated temporary directories. They cover original value types and absence, scope, preflight errors, read-back corruption, partial failure, unavailable/malformed recovery records and rollback failure reporting. The launcher tests cover explicit apply, cancellation and error handling. Diagnostics tests cover mismatches, unavailable root registration, resolution errors and no filesystem changes.
 
+The release-tool suite additionally checks a valid package, repeatable unsigned output on the same runtime, a bad archive checksum, traversal entries rejected before extraction, and failure when a requested signing certificate is unavailable.
+
 CI runs these on Windows Server 2022, Server 2025 and Windows 11 ARM, using Windows PowerShell and PowerShell 7. The server images add coverage; they do not imply Apple supports iCloud on Windows Server. Report actual green runs and their commit IDs; the matrix definition alone is not evidence that a platform passed.
+
+Measured baseline: [Windows validation run 39121620585](https://github.com/NotSandyFromKentucky/Windows-iCloudDrive_Sync_Setup/actions/runs/39121620585), commit `dbb648a0abf5995603b5ea591e908ba8e75a7a32`, passed all six OS/shell unit jobs, all three real-write/API jobs and package verification. Each integration job passed 36 checks, including real ACL denial and restoration after terminating a writer process.
+
+| Disposable image | Core/launcher/diagnostics on Windows PowerShell and PowerShell 7 | Real writes, interrupted recovery and API restoration |
+| --- | --- | --- |
+| Server 2022, build 20348 | Passed | Passed |
+| Server 2025, build 26100 | Passed | Passed |
+| Windows 11 ARM, build 26200 | Passed | Passed |
+
+The local account's installed iCloud package was `15.10.39.0` when checked. Its live mappings and resolved paths passed read-only diagnostics. Two-way cloud verification is a separate gate and must not be inferred from this table or the installed package version.
 
 Real-registry integration runs only in disposable Windows Sandbox or GitHub-hosted Windows VMs. The guard refuses self-hosted runners and ordinary developer accounts. It is an accidental-execution guard, not protection against an attacker forging environment variables. Real tests include permission denial, exact restore and process termination after a real write, followed by recovery from the on-disk backup. A separate API experiment evaluates `SHSetKnownFolderPath` and restores both User Shell Folders and Shell Folders snapshots. Evidence is uploaded as CI artifacts.
 
@@ -51,7 +63,7 @@ Deleting the test file propagates through iCloud. No source data or unrelated fi
 
 Microsoft documents [SHSetKnownFolderPath](https://learn.microsoft.com/en-us/windows/win32/api/shlobj_core/nf-shlobj_core-shsetknownfolderpath) for redirection. Our isolated evaluation records which registry values it changes, confirms the canonical path, retains a source file, and verifies exact restoration. The production backend remains scoped registry writes until those results establish that an API backend can also preserve all local aliases, originally absent values and recovery guarantees. An API call alone is not assumed equivalent to updating every alias.
 
-The first measured CI evaluations on Server 2022 and Server 2025 changed `Personal` in both User Shell Folders and Shell Folders, retained the source file, and restored both complete snapshots exactly. They did not add local aliases. The evaluation also seeds an existing local Documents alias and records whether it follows the API change. A replacement backend would need an expanded backup surface for Shell Folders and separate alias handling. Keeping the current backend preserves its tested recovery scope while the API experiment remains reproducible.
+The measured evaluations on all three images changed `Personal` in both User Shell Folders and Shell Folders, retained the source file, and restored both complete snapshots exactly. A seeded existing local Documents alias did **not** follow the API change on any image (`LocalAliasFollowsApi: false`). A replacement backend would need an expanded backup surface for Shell Folders and separate alias handling. Keeping the current backend preserves its tested recovery scope while the API experiment remains reproducible.
 
 ## Signing
 
@@ -68,5 +80,7 @@ It requires a code-signing EKU and private key, uses SHA-256 and an Authenticode
 ## Release gates
 
 `VERSION` and `build/ReleaseFiles.json` define the version and runtime allowlist. `tools/New-ReleasePackage.ps1` packages an exact Git commit, adds per-file hashes and signature state, and writes an archive checksum. `tools/Test-ReleasePackage.ps1` verifies contents, manifest, syntax and signatures when declared.
+
+The unsigned builder fixes entry order and ZIP timestamps to the source commit, enabling byte-identical retries on the same runtime. Signed timestamped builds need not be identical. Verification checks ZIP paths and the script-only size limit before extraction. Publication additionally requires the manifest's commit and version to match the checked-out version tag. A draft with different already-uploaded bytes is retained for inspection rather than overwritten.
 
 A version-tag push runs the full validation workflow before publishing. The release job requires the tag to point to the checked-out commit, creates or resumes a draft, verifies uploaded bytes by downloading them, then publishes. It refuses to overwrite a published version. The legacy `Release` and `v2.0.0` remain unchanged. The workflow has read-only permissions by default; only the publication job has contents-write access.

@@ -140,6 +140,30 @@ Invoke-ICloudFolders -ICloudRoot (Join-Path $PSScriptRoot 'crash-root') -Include
     Check ($crashBackup.Count -eq 1) 'interrupted process left one recoverable backup'
     Run-Cli 'crash-restore' @('-RestoreBackup',$crashBackup[0].FullName,'-Apply')
     Check ((Snapshot) -ceq $before) 'manual recovery after process termination restores exact original settings'
+
+    # Exercise sync-helper safeguards with a local guest fixture, never count it as cloud proof.
+    $helper = Join-Path $source 'tools\Test-ICloudRoundTrip.ps1'
+    $helperToken = [guid]::NewGuid().ToString('N')
+    $helperName = 'ICloudFolderSetup-SyncTest-'+$helperToken.Substring(0,10)+'-upload.txt'
+    $helperReturnName = $helperName.Replace('-upload.txt','-returned.txt')
+    $guestDocs = [Environment]::ExpandEnvironmentVariables($oldDocs)
+    $helperFile = Join-Path $guestDocs $helperReturnName
+    [IO.File]::WriteAllText($helperFile,'guest-only sync helper fixture')
+    $helperState = Join-Path $project 'sync-helper-state.json'
+    [pscustomobject]@{Path=(Join-Path $guestDocs $helperName);FileName=$helperName;ReturnPath=$helperFile;ReturnName=$helperReturnName;Token=$helperToken;Sha256=(Get-FileHash -LiteralPath $helperFile).Hash;CreatedUtc=[DateTime]::UtcNow.ToString('o');Verified=$false} |
+        ConvertTo-Json | Set-Content -LiteralPath $helperState -Encoding UTF8
+    $stateHash = (Get-FileHash -LiteralPath $helperState).Hash
+    $helperReport = & $helper -Mode Check -StatePath $helperState
+    Check ($helperReport.ReturnDetected -and $helperReport.ContentUnchanged -and $helperReport.Proof -like '*only if*' -and (Get-FileHash -LiteralPath $helperState).Hash -ceq $stateHash) 'sync helper checks fixture hash without claiming independent cloud proof or mutating state'
+    & $helper -Mode Cleanup -StatePath $helperState -WhatIf *> (Join-Path $output 'sync-helper-whatif.log')
+    Check ((Test-Path -LiteralPath $helperFile) -and (Test-Path -LiteralPath $helperState)) 'sync-helper cleanup WhatIf preserves file and session'
+    [IO.File]::WriteAllText($helperFile,'changed content')
+    $caught = $null
+    try { & $helper -Mode Cleanup -StatePath $helperState } catch { $caught=$_.Exception.Message }
+    Check ($caught -like '*content changed*' -and (Test-Path -LiteralPath $helperFile)) 'sync-helper cleanup refuses modified content'
+    [IO.File]::WriteAllText($helperFile,'guest-only sync helper fixture')
+    & $helper -Mode Cleanup -StatePath $helperState
+    Check (-not (Test-Path -LiteralPath $helperFile) -and -not (Test-Path -LiteralPath $helperState) -and (Test-Path -LiteralPath $sentinel)) 'sync-helper cleanup removes only its exact fixture and state'
 } catch {
     $script:failure = $_ | Out-String
 } finally {

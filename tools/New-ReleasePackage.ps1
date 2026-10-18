@@ -52,7 +52,25 @@ try {
         ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $package 'manifest.json') -Encoding UTF8
     $archive = Join-Path $OutputDirectory ($folderName + '.zip')
     if (Test-Path -LiteralPath $archive) { throw "Archive already exists; choose a new output directory: $archive" }
-    Compress-Archive -LiteralPath $package -DestinationPath $archive -CompressionLevel Optimal
+    # Stable ordering and commit timestamps make unsigned rebuilds byte-identical
+    # on the same runtime, so an interrupted draft upload can be resumed safely.
+    $epoch = & git @gitOptions show -s --format=%ct $commit
+    if ($LASTEXITCODE -ne 0) { throw 'Commit timestamp lookup failed.' }
+    $timestamp = [DateTimeOffset]::Parse('1970-01-01T00:00:00Z').AddSeconds([long]$epoch)
+    if ($timestamp.Year -lt 1980 -or $timestamp.Year -gt 2107) { throw 'Commit timestamp is outside the ZIP timestamp range.' }
+    Add-Type -AssemblyName System.IO.Compression
+    $archiveStream = [IO.File]::Open($archive,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+    $zip = $null
+    try {
+        $zip = New-Object IO.Compression.ZipArchive($archiveStream,[IO.Compression.ZipArchiveMode]::Create,$true)
+        foreach ($file in @(@($files) + 'manifest.json' | Sort-Object)) {
+            $entry = $zip.CreateEntry($folderName + '/' + $file,[IO.Compression.CompressionLevel]::Optimal)
+            $entry.LastWriteTime = $timestamp
+            $inputStream = [IO.File]::OpenRead((Join-Path $package $file))
+            $outputStream = $entry.Open()
+            try { $inputStream.CopyTo($outputStream) } finally { $inputStream.Dispose(); $outputStream.Dispose() }
+        }
+    } finally { if ($zip) { $zip.Dispose() }; $archiveStream.Dispose() }
     $digest = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
     $digest + '  ' + [IO.Path]::GetFileName($archive) | Set-Content -LiteralPath (Join-Path $OutputDirectory 'SHA256SUMS.txt') -Encoding ascii
     [pscustomobject]@{ Archive=$archive; SHA256=$digest; Commit=$commit; Signed=$signed }
