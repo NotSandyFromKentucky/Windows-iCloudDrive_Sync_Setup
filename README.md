@@ -33,6 +33,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Test-ICloudFolders.ps1
 
 This checks root registration, mappings, existing destination folders and Windows folder resolution. Exit code 0 means the checks passed, 2 means configuration needs attention, and 1 means an execution error. It does not prove cloud synchronization. See [verification guidance](docs/VERIFICATION.md) for an explicit two-way sync test, platform coverage, API evaluation and signing limits.
 
+An observed cloud round trip passed on 2026-10-18 with iCloud for Windows 15.10.39.0: a Documents test file reached iCloud.com, was renamed there, and returned to Windows with unchanged SHA-256. Repeat this check on your own installation; it does not guarantee future synchronization or compatibility with every application.
+
 ## Preview
 
 From this directory:

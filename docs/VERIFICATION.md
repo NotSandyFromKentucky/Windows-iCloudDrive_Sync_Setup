@@ -34,7 +34,7 @@ Expanded evidence: [run 39122943292](https://github.com/NotSandyFromKentucky/Win
 
 The local account's installed iCloud package was `15.10.39.0` when checked. Its live mappings and resolved paths passed read-only diagnostics. Two-way cloud verification is a separate gate and must not be inferred from this table or the installed package version.
 
-For the live round-trip session, the Windows Cloud Files API reported the test file as a cloud placeholder with `IN_SYNC` set (state 9). This is provider-reported status, not independent remote proof. At the last check, iCloud.com required the user's sign-in and the expected remote rename had not returned. The session remains local under `.local`; no Apple credentials are collected or committed.
+Live round trip passed on 2026-10-18 at 14:11 UTC with iCloud for Windows `15.10.39.0`. A unique 191-byte text file created through the redirected Windows Documents folder was observed in iCloud.com. After the user signed in, the file was renamed there through the visible Drive UI; the returned name arrived in Windows, the original name disappeared, and its SHA-256 matched the original exactly. No local rename was performed. Read-only folder diagnostics also remained healthy. Session metadata and the cloud screenshot stay under ignored `.local`; personal paths, identifiers and Apple credentials are not committed. This establishes one observed two-way round trip on this installation, not universal or ongoing sync health.
 
 Real-registry integration runs only in disposable Windows Sandbox or GitHub-hosted Windows VMs. The guard refuses self-hosted runners and ordinary developer accounts. It is an accidental-execution guard, not protection against an attacker forging environment variables. Real tests include permission denial, exact restore and process termination after a real write, followed by recovery from the on-disk backup. A separate API experiment evaluates `SHSetKnownFolderPath` and restores both User Shell Folders and Shell Folders snapshots. Evidence is uploaded as CI artifacts.
 
@@ -91,6 +91,6 @@ A version-tag push runs the full validation workflow before publishing. The rele
 
 ## Remaining external gates
 
-- Complete the remote rename and verify its unchanged contents arrive back in Windows. Provider status, local fixtures and CI never replace this check.
+- Repeat the documented remote round trip on each new installation or when diagnosing sync problems. The observed pass above applies to the tested account, version and time.
 - Actual trusted signing requires a suitable certificate. Optional signing and rejection of an unavailable certificate are implemented; releases are explicitly unsigned until such a certificate is supplied.
 - Application-specific custom save locations and other iCloud versions are not universally certified by a standard Windows dialog test. Retain this scope statement instead of claiming perfection or compatibility with every application/version.
