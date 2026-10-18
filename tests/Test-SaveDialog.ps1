@@ -97,7 +97,8 @@ public static class SaveDialogEvaluation {
                     folder.GetDisplayName(0x80058000,out name); // SIGDN_FILESYSPATH
                     folderPath=Marshal.PtrToStringUni(name);
                     System.IO.File.AppendAllText(progressPath,"\r\nFolder: "+folderPath);
-                    System.IO.File.WriteAllText(observedPath,folderPath);
+                    System.IO.File.WriteAllText(observedPath+".tmp",folderPath);
+                    System.IO.File.Move(observedPath+".tmp",observedPath);
                     timer.Stop();
                 } catch (Exception ex) {
                     System.IO.File.AppendAllText(progressPath,"\r\nCallback error: "+ex.Message);

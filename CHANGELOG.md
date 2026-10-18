@@ -5,7 +5,7 @@
 - Adds read-only setup diagnostics, JSON output and an Explorer check launcher.
 - Previews use friendly folder labels and show whether each value will be added, updated or retained.
 - Adds Windows CI across Server 2022, Server 2025 and Windows 11 ARM, with Windows PowerShell and PowerShell 7 unit coverage and disposable-runner real-registry tests.
-- Expands failure coverage to damaged backups, read-back corruption, real permission denial and recovery after process termination.
+- Expands failure coverage to damaged backups, read-back corruption, real permission denial and recovery after process termination. All three disposable Windows images passed 41 integration checks, including a real standard Save dialog folder check and sync-helper cleanup safeguards.
 - Evaluates the documented Known Folder API in disposable VMs with exact registry restoration; production retains its checked registry backend.
 - Adds versioned package automation, per-file manifests, SHA-256 checksums, explicit signature state and optional Authenticode signing with an existing certificate.
 - Version-tag releases run validation, verify uploaded bytes and publish automatically; existing published versions are never overwritten.

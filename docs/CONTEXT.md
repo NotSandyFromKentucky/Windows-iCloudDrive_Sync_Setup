@@ -8,6 +8,8 @@ This repository contains a per-user Windows folder-path configurator for iCloud 
 
 Version 2.1 adds `Test-ICloudFolders.ps1` and `Check-ICloudFolderSetup.cmd` for read-only diagnostics. They report root registration, mappings, destination existence and Windows folder resolution, with explicit unknown cloud status. Friendly plan labels are derived from `Get-FolderMap`; raw value names remain available in JSON diagnostics. See `docs/VERIFICATION.md` for the full validation and signing policy.
 
+The expanded Windows CI matrix passed six OS/shell local-suite jobs, three isolated 41-check integration/API jobs and package verification. The standard Save dialog default path is observed through its own COM API in a dedicated disposable fixture, then that fixture process is terminated; no user input is injected. Signing support is optional and staged-only. Real cloud round-trip verification remains pending the user's remote action; local provider `IN_SYNC` status is recorded without overstating its proof.
+
 The Explorer wrapper passed five isolated checks using a stub module: cancel, explicit apply, other input cancelling, preview failure preventing apply, and apply failure returning a nonzero exit code. The existing 16 regression scenarios also passed after adding the wrapper. No live host-account apply was used to test the launcher.
 
 ## Decisions

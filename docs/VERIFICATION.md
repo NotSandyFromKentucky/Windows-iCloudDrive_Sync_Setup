@@ -24,6 +24,8 @@ CI runs these on Windows Server 2022, Server 2025 and Windows 11 ARM, using Wind
 
 Measured baseline: [Windows validation run 39121620585](https://github.com/NotSandyFromKentucky/Windows-iCloudDrive_Sync_Setup/actions/runs/39121620585), commit `dbb648a0abf5995603b5ea591e908ba8e75a7a32`, passed all six OS/shell unit jobs, all three real-write/API jobs and package verification. Each integration job passed 36 checks, including real ACL denial and restoration after terminating a writer process.
 
+Expanded evidence: [run 39122943292](https://github.com/NotSandyFromKentucky/Windows-iCloudDrive_Sync_Setup/actions/runs/39122943292), commit `f270c0fcddfcc3f241388334a9855a55f5bd7bbd`, passed all ten jobs. Each image passed **41 real integration checks**, now including safe sync-helper cleanup and the actual Windows Save dialog's default Documents folder. The dialog is instantiated without an initial directory, reports its physical folder through `IFileDialog`, and its dedicated guest fixture process is terminated after observation; no input is injected and no file is saved by that dialog. A separate application-style save through the Documents API is also verified. All six local-suite jobs passed 19 core, five launcher and five diagnostic scenarios; package verification additionally passed five release-tool scenarios.
+
 | Disposable image | Core/launcher/diagnostics on Windows PowerShell and PowerShell 7 | Real writes, interrupted recovery and API restoration |
 | --- | --- | --- |
 | Server 2022, build 20348 | Passed | Passed |
@@ -31,6 +33,8 @@ Measured baseline: [Windows validation run 39121620585](https://github.com/NotSa
 | Windows 11 ARM, build 26200 | Passed | Passed |
 
 The local account's installed iCloud package was `15.10.39.0` when checked. Its live mappings and resolved paths passed read-only diagnostics. Two-way cloud verification is a separate gate and must not be inferred from this table or the installed package version.
+
+For the live round-trip session, the Windows Cloud Files API reported the test file as a cloud placeholder with `IN_SYNC` set (state 9). This is provider-reported status, not independent remote proof. At the last check, iCloud.com required the user's sign-in and the expected remote rename had not returned. The session remains local under `.local`; no Apple credentials are collected or committed.
 
 Real-registry integration runs only in disposable Windows Sandbox or GitHub-hosted Windows VMs. The guard refuses self-hosted runners and ordinary developer accounts. It is an accidental-execution guard, not protection against an attacker forging environment variables. Real tests include permission denial, exact restore and process termination after a real write, followed by recovery from the on-disk backup. A separate API experiment evaluates `SHSetKnownFolderPath` and restores both User Shell Folders and Shell Folders snapshots. Evidence is uploaded as CI artifacts.
 
@@ -84,3 +88,9 @@ It requires a code-signing EKU and private key, uses SHA-256 and an Authenticode
 The unsigned builder fixes entry order and ZIP timestamps to the source commit, enabling byte-identical retries on the same runtime. Signed timestamped builds need not be identical. Verification checks ZIP paths and the script-only size limit before extraction. Publication additionally requires the manifest's commit and version to match the checked-out version tag. A draft with different already-uploaded bytes is retained for inspection rather than overwritten.
 
 A version-tag push runs the full validation workflow before publishing. The release job requires the tag to point to the checked-out commit, creates or resumes a draft, verifies uploaded bytes by downloading them, then publishes. It refuses to overwrite a published version. The legacy `Release` and `v2.0.0` remain unchanged. The workflow has read-only permissions by default; only the publication job has contents-write access.
+
+## Remaining external gates
+
+- Complete the remote rename and verify its unchanged contents arrive back in Windows. Provider status, local fixtures and CI never replace this check.
+- Actual trusted signing requires a suitable certificate. Optional signing and rejection of an unavailable certificate are implemented; releases are explicitly unsigned until such a certificate is supplied.
+- Application-specific custom save locations and other iCloud versions are not universally certified by a standard Windows dialog test. Retain this scope statement instead of claiming perfection or compatibility with every application/version.
