@@ -1,32 +1,119 @@
-# Windows-iCloudDrive_Sync_Setup
-This simple .bat file will create windows personal folders (Desktop, Documents, Pictures, Videos, Downloads) to your iCloud drive folder on windows.
-That way, you will be able to link personal folders (Desktop, Documents, Pictures, Videos, Downloads) in Icloud, and files in those folders will be accessible across all your iDevices and in iCloud web.
-## This script:
-- Verifies iCloud Drive installation by checking for the iCloud folder in the current user's directory
-- Automatically creates necessary folders in iCloud Drive
-- Redirects Windows system folders to iCloud Drive locations
-- Creates a backup of "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders"
-- Provides verbose, user-friendly output
-- Requires administrator privileges
+# iCloud home folder settler
 
+Preview and redirect selected Windows user folders into an existing iCloud Drive root. The tool changes paths for the current account; it does not install iCloud, enable synchronization, or move files.
 
-## Download
-Download archive from release https://github.com/NotSandyFromKentucky/Windows-iCloudDrive_Sync_Setup/releases/tag/Release
+## Requirements
 
-### OR
+- Windows with Windows PowerShell 5.1 and iCloud for Windows already configured.
+- Run as the account whose folders you want to change. Administrator access is unnecessary; do not run as a different administrator account.
+- Confirm iCloud is signed in and the intended root is available. A registered provider path proves configuration, not working synchronization.
 
-Copy file set_onedrivefolder.bat from https://github.com/NotSandyFromKentucky/Windows-iCloudDrive_Sync_Setup/blob/6f6f01653080d0669771d5feb4988c24688ab2c0/set_onedrivefolder.bat and save locally.
+Windows PowerShell 5.1 is the tested runtime. Windows/iCloud integration still requires testing in an isolated account or VM before deployment to other machines. There are no third-party dependencies or Java requirements.
 
-## Usage:
+## Run from Explorer
 
-Run the script with administrator privileges.
+Double-click **`Open-ICloudFolderSetup.cmd`**. It displays the default preview and asks you to type `APPLY` before changing settings. Press Enter to cancel. The window stays open afterward so you can read the result and backup path. Run it normally as your own account; administrator access is unnecessary.
 
-## Recovery:
+This launcher uses an execution-policy override for its PowerShell process only. It uses the default root and leaves Music off. Existing-content and root-validation checks still apply; use the CLI options below if you need a custom root or have reviewed content that must remain in its old location.
 
-If you feel that system was fucked a little after changes,, run with admin created file RestoreRegistry.bat, this will restore state of registry folder befure execution.
+## Preview
 
-although backup is done, do it at your own risk, windows registry no penis canina.
+From this directory:
 
+```powershell
+powershell.exe -NoProfile -File .\Set-ICloudFolders.ps1
+```
 
-#### BR
-#### Slava :3
+The default root is `$env:USERPROFILE\iCloudDrive`. Specify a different existing location when needed:
+
+```powershell
+powershell.exe -NoProfile -File .\Set-ICloudFolders.ps1 -ICloudRoot 'D:\iCloudDrive'
+```
+
+Preview displays every current and proposed registry value and warns about existing source content. It creates no folders, backups, or logs and writes no settings. Missing roots, file obstructions, unsupported registry types, and unreadable paths produce errors rather than a misleading plan.
+
+If local execution policy blocks scripts, a one-process override can run a reviewed local script without changing the machine policy:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Set-ICloudFolders.ps1
+```
+
+`Set-ICloudFolders.cmd` is an optional launcher that forwards arguments, respects execution policy, returns the PowerShell exit code, and never pauses. Use PowerShell directly for paths containing cmd metacharacters such as `%`.
+
+## Apply
+
+Review the preview and decide how existing files will be handled first. Nothing copies, merges, overwrites, or deletes your existing files.
+
+```powershell
+powershell.exe -NoProfile -File .\Set-ICloudFolders.ps1 -Apply
+```
+
+The root is compared with the current account's iCloud Drive registration in Windows SyncRootManager. A mismatch stops application, even if `-VerifiedSyncRoot` is supplied. If no registration is available on your version of iCloud, manually check the root in iCloud settings and use the fallback:
+
+```powershell
+powershell.exe -NoProfile -File .\Set-ICloudFolders.ps1 -Apply -VerifiedSyncRoot
+```
+
+If a source folder contains files and its path will change, application stops. After reviewing or separately copying that content, `-AllowExistingContent` permits changing the pointer while leaving all source files in place. This flag performs no migration. The same rule applies to changing an already redirected location.
+
+```powershell
+powershell.exe -NoProfile -File .\Set-ICloudFolders.ps1 -Apply -AllowExistingContent
+```
+
+Add `-IncludeMusic` to both preview and apply if Music should be redirected. `-Apply -WhatIf` performs the apply preflight but writes nothing. `-Confirm` can request PowerShell's standard confirmation for the complete operation. Exit code `0` means preview/completion/WhatIf; `1` means failure.
+
+## Folder scope
+
+| Folder | Destination beneath root | Default |
+| --- | --- | --- |
+| Desktop | `Desktop` | Included |
+| Documents | `Documents` | Included |
+| Pictures | `Pictures` | Included |
+| Videos | `Videos` | Included |
+| Downloads | `Downloads` | Included |
+| Captures | `Videos\Captures` | Included |
+| Music | `Music` | Opt in |
+
+Legacy named entries and local-folder aliases point to the same destination. `Images` is no longer a separate Pictures destination. OneDrive-specific entries, AppData, Start Menu, Startup, and unrelated settings are untouched. Existing `Images` contents are not merged into `Pictures`; review them separately if you used the old scripts.
+
+## Backups, failures, and restore
+
+Before any registry write, the tool saves and verifies:
+
+```text
+%LOCALAPPDATA%\ICloudFolderSettler\Recovery\<timestamp>-<unique-id>\before.json
+%LOCALAPPDATA%\ICloudFolderSettler\Recovery\<timestamp>-<unique-id>\operation.log
+```
+
+The backup records exact unexpanded strings, registry types, and whether each value originally existed. It is bound to the account SID and the specific registry key. It is local to this machine/account, contains personal paths, and should not be committed. Backups are retained until you choose to remove them.
+
+Destination creation and write-access probes complete before registry changes. Writes are checked immediately and at completion. A failure after writes begin triggers best-effort restoration of all affected values, including deletion of newly introduced values. If rollback itself fails, the error explicitly says `ROLLBACK INCOMPLETE` and identifies the backup. Read the log and correct the underlying permissions or availability problem before restoring.
+
+Preview and then restore a trusted backup:
+
+```powershell
+powershell.exe -NoProfile -File .\Set-ICloudFolders.ps1 -RestoreBackup 'C:\path\to\before.json'
+powershell.exe -NoProfile -File .\Set-ICloudFolders.ps1 -RestoreBackup 'C:\path\to\before.json' -Apply
+```
+
+Restore checks the backup schema, SID, value-name allowlist, and original destination availability. It also makes a new backup of current values, so restoration can be reversed. It changes settings only; files remain where they are. Do not edit recovery JSON or load untrusted backups.
+
+Preflight failures are printed to the console. Logs start only after apply is approved and recovery storage is ready. New destination directories can remain after a failed operation; the tool deliberately does not delete them or their contents. A process crash, shutdown, or power failure cannot trigger automatic rollback: use the printed backup manually. The mutex prevents concurrent instances of this tool for the account, but other applications can still change folder settings.
+
+## Verify after applying
+
+1. Sign out and sign back in; save open work first.
+2. Open each affected folder in Explorer and check its location and expected files. Also test applications that save to those folders.
+3. Verify an ordinary test file synchronizes through iCloud to another device or iCloud.com. Registry read-back alone does not verify Explorer refresh or cloud sync.
+4. Retain the backup until you have verified the new setup. Keep old source files until any separate migration has been checked.
+
+## Development
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-ICloudFolders.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-ExplorerLauncher.ps1
+```
+
+Tests use an in-memory registry boundary and temporary folders inside this repository. They never write user-shell registry values. See [project context](docs/CONTEXT.md) for architecture, decisions, validation coverage, and integration checks still needed.
+
+An isolated Windows Sandbox run additionally passed 29 real-registry integration checks on 2026-10-18, including apply, exact restore, and rollback after a partial write. `tests/Invoke-SandboxIntegration.ps1` is the guest-only test payload; it must be launched through a staged Sandbox configuration, never directly on the host. This used a synthetic local root and did not test iCloud synchronization or sign-out/sign-in behavior.

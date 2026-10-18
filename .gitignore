@@ -1,4 +1,9 @@
-
-.vscode/settings.json
-iCloudFoldersBackup.reg
-RestoreRegistry.bat
+/.idea/
+/.vscode/settings.json
+/.local/
+/.test-*/
+/Recovery/
+*.log
+before.json
+*.reg
+/RestoreRegistry.bat
