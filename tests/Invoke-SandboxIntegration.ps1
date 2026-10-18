@@ -8,7 +8,7 @@ $project = if ($mode -eq 'WindowsSandbox') { 'C:\SandboxProject' } else { Join-P
 $source = if ($mode -eq 'WindowsSandbox') { 'C:\TestInput' } else { Split-Path $PSScriptRoot -Parent }
 $null = [IO.Directory]::CreateDirectory($output)
 $null = [IO.Directory]::CreateDirectory($project)
-Copy-Item -LiteralPath (Join-Path $source 'Set-ICloudFolders.ps1'),(Join-Path $source 'ICloudFolders.psm1') -Destination $project
+Copy-Item -LiteralPath (Join-Path $source 'Set-ICloudFolders.ps1'),(Join-Path $source 'ICloudFolders.psm1'),(Join-Path $source 'Test-ICloudFolders.ps1') -Destination $project
 $script:checks = @()
 $script:backupPath = $null
 $script:failure = $null
@@ -66,7 +66,10 @@ try {
     Check ($actualDocs -ceq (Join-Path $root 'Documents')) 'fresh-process Documents API resolves redirected path'
     & powershell.exe -NoProfile -Command "[IO.File]::WriteAllText([IO.Path]::Combine([Environment]::GetFolderPath('MyDocuments'),'application-save.txt'),'saved through the Windows Documents API')"
     Check ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath (Join-Path $root 'Documents\application-save.txt'))) 'application-style save uses redirected Documents'
-    $diagnostics = Test-ICloudFolderSetup -ICloudRoot $root -IncludeMusic
+    # Query from a fresh process; Windows Shell caches folder resolutions per process.
+    $diagnosticJson = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $project 'Test-ICloudFolders.ps1') -ICloudRoot $root -IncludeMusic -Json
+    $diagnosticJson | Set-Content -LiteralPath (Join-Path $output 'diagnostics.json') -Encoding UTF8
+    $diagnostics = $diagnosticJson | Out-String | ConvertFrom-Json
     Check (@($diagnostics.RegistryValues | Where-Object { -not $_.Matches }).Count -eq 0 -and @($diagnostics.ResolvedFolders | Where-Object { -not $_.Matches }).Count -eq 0) 'diagnostics agree with all guest registry and resolved paths'
     Run-Cli 'restore-preview' @('-RestoreBackup',$script:backupPath)
     Check ((Snapshot) -ceq $applied) 'restore preview leaves settings unchanged'

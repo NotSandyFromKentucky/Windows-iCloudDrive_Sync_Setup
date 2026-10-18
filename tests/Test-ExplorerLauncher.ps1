@@ -36,7 +36,10 @@ Export-ModuleMember -Function Invoke-ICloudFolders
         $processInfo.RedirectStandardOutput = $true
         $processInfo.RedirectStandardError = $true
         $process = [Diagnostics.Process]::Start($processInfo)
-        $process.StandardInput.WriteLine($case.Input)
+        # Write raw BOM-free bytes: runner console encodings may otherwise prefix APPLY with U+FEFF.
+        $inputBytes = [Text.Encoding]::ASCII.GetBytes($case.Input + "`r`n")
+        $process.StandardInput.BaseStream.Write($inputBytes, 0, $inputBytes.Length)
+        $process.StandardInput.BaseStream.Flush()
         $process.StandardInput.Close()
         $stdout = $process.StandardOutput.ReadToEnd()
         $stderr = $process.StandardError.ReadToEnd()

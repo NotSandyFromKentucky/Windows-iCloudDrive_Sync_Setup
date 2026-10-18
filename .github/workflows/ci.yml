@@ -53,6 +53,7 @@ jobs:
         shell: powershell
         run: ./tests/Invoke-SandboxIntegration.ps1
       - name: Evaluate Windows Known Folder API and exact restoration
+        if: always()
         shell: powershell
         run: ./tests/Test-KnownFolderApi.ps1
       - name: Retain isolated test evidence
