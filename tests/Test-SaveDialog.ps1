@@ -1,5 +1,5 @@
 #requires -Version 5.1
-# A real Windows Save dialog, cancelled through its own COM API; no input injection.
+# A real Windows Save dialog; its parent terminates this dedicated fixture after observation.
 [CmdletBinding()]
 param([Parameter(Mandatory)][string]$ExpectedDirectory, [Parameter(Mandatory)][string]$ResultPath)
 $ErrorActionPreference='Stop'
@@ -73,7 +73,7 @@ public class SaveTestEvents : ISaveTestEvents {
 }
 
 public static class SaveDialogEvaluation {
-    public static string ObserveDefaultFolder(string progressPath) {
+    public static string ObserveDefaultFolder(string progressPath, string observedPath) {
         ISaveTestDialog dialog=(ISaveTestDialog)new SaveDialogClass();
         Timer timer=new Timer();
         string folderPath=null;
@@ -97,7 +97,7 @@ public static class SaveDialogEvaluation {
                     folder.GetDisplayName(0x80058000,out name); // SIGDN_FILESYSPATH
                     folderPath=Marshal.PtrToStringUni(name);
                     System.IO.File.AppendAllText(progressPath,"\r\nFolder: "+folderPath);
-                    dialog.Close(unchecked((int)0x800704c7)); // normal cancellation
+                    System.IO.File.WriteAllText(observedPath,folderPath);
                     timer.Stop();
                 } catch (Exception ex) {
                     System.IO.File.AppendAllText(progressPath,"\r\nCallback error: "+ex.Message);
@@ -129,7 +129,7 @@ public static class SaveDialogEvaluation {
 $actual=$null
 $failure=$null
 try {
-    $actual=[SaveDialogEvaluation]::ObserveDefaultFolder($ResultPath+'.progress.txt')
+    $actual=[SaveDialogEvaluation]::ObserveDefaultFolder($ResultPath+'.progress.txt',$ResultPath+'.observed-path.txt')
     if ($actual -ine $ExpectedDirectory) { throw "Default Save dialog folder mismatch. Expected '$ExpectedDirectory'; resolved '$actual'." }
 } catch { $failure=$_.Exception.Message }
 [pscustomobject]@{ Success=($null -eq $failure); Expected=$ExpectedDirectory; Actual=$actual; Error=$failure; Mechanism='Real IFileSaveDialog; initial directory left unset; cancelled through its own COM API; no file saved.' } |
