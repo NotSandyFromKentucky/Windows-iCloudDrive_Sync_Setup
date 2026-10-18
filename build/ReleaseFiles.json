@@ -4,6 +4,7 @@
   "Set-ICloudFolders.cmd",
   "Open-ICloudFolderSetup.ps1",
   "Open-ICloudFolderSetup.cmd",
+  "Reset-WindowsFolderDefaults.cmd",
   "Test-ICloudFolders.ps1",
   "Check-ICloudFolderSetup.cmd",
   "README.md",

@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Adds preview-first `-ResetToDefaults` for every managed folder including Music, with exact backup, checked writes and rollback. Existing files stay in place.
+- Adds `Reset-WindowsFolderDefaults.cmd` for Explorer, requiring an exact `RESET` acknowledgement after previewing destinations and the existing-content notice.
+
 ## v2.1.0
 
 - Adds read-only setup diagnostics, JSON output and an Explorer check launcher.

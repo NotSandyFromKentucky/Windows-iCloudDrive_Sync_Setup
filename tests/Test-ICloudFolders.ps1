@@ -197,6 +197,60 @@ try {
     Assert ((& $module { @($script:Fake.Keys | Sort-Object | ForEach-Object { $script:Fake[$_] }) | ConvertTo-Json -Depth 6 -Compress }) -ceq $snapshot) 'Read-back mismatch failed to restore prior snapshot'
     & $module { param($Original) Set-Item Function:script:Write-FolderValue -Value $Original } $savedWrite
     Pass 'read-back corruption is detected and rolled back'
+    # Defaults use an isolated profile fixture, never the developer's destinations.
+    $profile = Join-Path $testRoot 'local profile'
+    $null = [IO.Directory]::CreateDirectory($profile)
+    & $module {
+        param($Profile, $Source)
+        $script:DefaultProfile = $Profile
+        function script:Get-DefaultProfileRoot { $script:DefaultProfile }
+        function script:Get-RegisteredICloudRoots { throw 'Reset must not consult iCloud registration' }
+        $script:Fake = @{
+            Desktop = [pscustomobject]@{Name='Desktop';Exists=$true;Kind='String';Data=$Source}
+            Unrelated = [pscustomobject]@{Name='Unrelated';Exists=$true;Kind='String';Data='untouched'}
+        }
+        $script:WriteCount = 0
+        $script:FailAt = 0
+        $script:ResetRecovery = Join-Path $script:TestWorkspace 'reset-recovery'
+        function script:Get-RecoveryRoot { $script:ResetRecovery }
+    } $profile $source
+    Invoke-ICloudFolders -ResetToDefaults
+    Invoke-ICloudFolders -ResetToDefaults -Apply -AllowExistingContent -WhatIf
+    Assert ((& $module { $script:WriteCount }) -eq 0) 'Reset preview/WhatIf wrote registry'
+    Assert (@(Get-ChildItem -LiteralPath $profile -Force).Count -eq 0) 'Reset preview/WhatIf created destinations'
+    Assert (-not (Test-Path (Join-Path $testRoot 'reset-recovery'))) 'Reset preview/WhatIf created backup'
+    Pass 'reset preview and WhatIf are read only and independent of iCloud'
+
+    Expect-Failure { Invoke-ICloudFolders -ResetToDefaults -Apply } 'requires review'
+    Expect-Failure { Invoke-ICloudFolders -ResetToDefaults -ICloudRoot $cloud } 'cannot be combined'
+    Expect-Failure { Invoke-ICloudFolders -ResetToDefaults -RestoreBackup $original } 'cannot be combined'
+    Expect-Failure { Invoke-ICloudFolders -ResetToDefaults -IncludeMusic } 'cannot be combined'
+    Expect-Failure { Invoke-ICloudFolders -ResetToDefaults -VerifiedSyncRoot } 'cannot be combined'
+    Assert ((& $module { $script:WriteCount }) -eq 0) 'Rejected reset wrote registry'
+    Pass 'reset requires source-content review and rejects conflicting modes'
+
+    & $module { $script:FailAt = 4 }
+    Expect-Failure { Invoke-ICloudFolders -ResetToDefaults -Apply -AllowExistingContent } 'Original settings retained/restored'
+    Assert ((& $module { $script:Fake.Count -eq 2 -and $script:Fake['Desktop'].Kind -ceq 'String' -and -not $script:Fake.ContainsKey('Personal') })) 'Reset rollback lost type or absent aliases'
+    Assert ((& $module { $script:Fake['Desktop'].Data }) -ceq $source) 'Reset rollback lost original path'
+    Pass 'partial reset rolls back exact values and removes introduced aliases'
+
+    & $module { $script:FailAt = 0 }
+    Invoke-ICloudFolders -ResetToDefaults -Apply -AllowExistingContent
+    & $module {
+        $map = Get-FolderMap -IncludeMusic
+        foreach ($name in $map.Keys) {
+            if ($script:Fake[$name].Data -cne (Join-Path $script:DefaultProfile $map[$name]) -or $script:Fake[$name].Kind -cne 'ExpandString') { throw "Incorrect default for $name" }
+        }
+        if ($script:Fake.Count -ne 14 -or $script:Fake.Unrelated.Data -cne 'untouched') { throw 'Reset scope changed' }
+    }
+    Assert ([IO.File]::ReadAllText((Join-Path $source 'keep.txt')) -ceq 'keep') 'Reset moved/deleted source content'
+    Pass 'reset covers all seven folders and aliases including Music while retaining content and unrelated values'
+
+    $resetBackup = @(Get-ChildItem (Join-Path $testRoot 'reset-recovery') -Recurse -Filter before.json)[0].FullName
+    Invoke-ICloudFolders -RestoreBackup $resetBackup -Apply
+    Assert (& $module { $script:Fake.Count -eq 2 -and $script:Fake.Desktop.Kind -ceq 'String' -and $script:Fake.Desktop.Data -ceq $args[0] } $source) 'Reset backup failed to restore exact original state'
+    Pass 'reset backup reverses the reset including originally absent Music aliases'
     Write-Host "$script:passed tests passed. No user-shell registry values were written."
 } finally {
     Remove-Module $module -Force

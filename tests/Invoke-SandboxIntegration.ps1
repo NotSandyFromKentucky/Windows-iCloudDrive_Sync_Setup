@@ -154,6 +154,29 @@ Invoke-ICloudFolders -ICloudRoot (Join-Path $PSScriptRoot 'crash-root') -Include
     Run-Cli 'crash-restore' @('-RestoreBackup',$crashBackup[0].FullName,'-Apply')
     Check ((Snapshot) -ceq $before) 'manual recovery after process termination restores exact original settings'
 
+    # Reset only in this disposable guest; the host must never run this test.
+    Run-Cli 'defaults-preview' @('-ResetToDefaults')
+    Run-Cli 'defaults-whatif' @('-ResetToDefaults','-Apply','-AllowExistingContent','-WhatIf')
+    Check ((Snapshot) -ceq $before) 'reset preview and WhatIf leave real registry unchanged'
+    $priorBackups = @(Get-ChildItem -LiteralPath $recovery -Recurse -Filter before.json | Select-Object -ExpandProperty FullName)
+    try {
+        Run-Cli 'defaults-apply' @('-ResetToDefaults','-Apply','-AllowExistingContent')
+        $defaultValues = & $module {
+            $defaults = Get-FolderMap -IncludeMusic
+            foreach ($name in $defaults.Keys) {
+                $value = Read-FolderValue $name
+                if (-not $value.Exists -or $value.Kind -cne 'ExpandString' -or $value.Data -cne (Join-Path $env:USERPROFILE $defaults[$name])) { throw "Incorrect real default: $name" }
+            }
+            $defaults.Count
+        }
+        Check ($defaultValues -eq 13) 'real reset sets all seven local folders and aliases including Music'
+        Check ([IO.File]::ReadAllText($sentinel) -ceq 'source must remain unchanged') 'real reset retains source content'
+    } finally {
+        $resetBackups = @(Get-ChildItem -LiteralPath $recovery -Recurse -Filter before.json | Where-Object { $priorBackups -notcontains $_.FullName })
+        if ($resetBackups.Count -eq 1) { Run-Cli 'defaults-restore' @('-RestoreBackup',$resetBackups[0].FullName,'-Apply') }
+    }
+    Check ((Snapshot) -ceq $before) 'reset recovery backup restores exact original real registry snapshot'
+
     # Exercise sync-helper safeguards with a local guest fixture, never count it as cloud proof.
     $helper = Join-Path $source 'tools\Test-ICloudRoundTrip.ps1'
     $helperToken = [guid]::NewGuid().ToString('N')

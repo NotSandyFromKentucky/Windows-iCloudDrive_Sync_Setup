@@ -27,6 +27,7 @@ function Get-FolderMap {
 }
 
 function Get-UserSid { [Security.Principal.WindowsIdentity]::GetCurrent().User.Value }
+function Get-DefaultProfileRoot { Get-NormalPath $env:USERPROFILE }
 function Get-RecoveryRoot { Get-NormalPath (Join-Path $env:LOCALAPPDATA 'ICloudFolderSettler\Recovery') }
 
 function Get-FolderLabel {
@@ -208,8 +209,11 @@ function Invoke-ICloudFolders {
     param(
         [string]$ICloudRoot = "$env:USERPROFILE\iCloudDrive",
         [switch]$Apply, [switch]$VerifiedSyncRoot, [switch]$IncludeMusic,
-        [switch]$AllowExistingContent, [string]$RestoreBackup
+        [switch]$AllowExistingContent, [string]$RestoreBackup, [switch]$ResetToDefaults
     )
+    if ($ResetToDefaults -and ($RestoreBackup -or $PSBoundParameters.ContainsKey('ICloudRoot') -or $VerifiedSyncRoot -or $IncludeMusic)) {
+        throw 'ResetToDefaults cannot be combined with RestoreBackup, ICloudRoot, VerifiedSyncRoot or IncludeMusic. Reset includes every managed folder, including Music.'
+    }
     $mutex = New-Object Threading.Mutex($false, ('Local\ICloudFolders-' + (Get-UserSid)))
     $locked = $false
     try {
@@ -233,10 +237,15 @@ function Invoke-ICloudFolders {
                 }
             }
         } else {
-            $root = Get-NormalPath $ICloudRoot
-            if (-not (Test-Path -LiteralPath $root -PathType Container)) { throw "iCloud root must already exist: $root" }
-            $registeredRoots = @(Get-RegisteredICloudRoots)
-            $map = Get-FolderMap -IncludeMusic:$IncludeMusic
+            if ($ResetToDefaults) {
+                $root = Get-DefaultProfileRoot
+                if (-not (Test-Path -LiteralPath $root -PathType Container)) { throw "User profile must already exist: $root" }
+            } else {
+                $root = Get-NormalPath $ICloudRoot
+                if (-not (Test-Path -LiteralPath $root -PathType Container)) { throw "iCloud root must already exist: $root" }
+                $registeredRoots = @(Get-RegisteredICloudRoots)
+            }
+            $map = Get-FolderMap -IncludeMusic:($IncludeMusic -or $ResetToDefaults)
             foreach ($name in $map.Keys) {
                 $old = Read-FolderValue $name
                 $before += $old
@@ -269,7 +278,7 @@ function Invoke-ICloudFolders {
         foreach ($message in @($contentWarnings | Select-Object -Unique)) { Write-Warning $message }
         if (-not $Apply) { Write-Host 'Preview only. Use -Apply to change settings. No files are moved.'; return }
         if ($contentWarnings.Count) { throw 'Existing source content requires review. See the warnings above.' }
-        if (-not $RestoreBackup) {
+        if (-not $RestoreBackup -and -not $ResetToDefaults) {
             if ($registeredRoots.Count -gt 0 -and $registeredRoots -notcontains $root) {
                 throw "Requested root does not match this user's registered iCloud root(s): $($registeredRoots -join ', ')"
             }

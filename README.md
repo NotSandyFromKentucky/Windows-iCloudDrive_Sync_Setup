@@ -97,6 +97,25 @@ Legacy named entries and local-folder aliases point to the same destination. `Im
 
 ## Backups, failures, and restore
 
+### Reset to Windows defaults
+
+Double-click **`Reset-WindowsFolderDefaults.cmd`** to preview local defaults for all seven managed folders, including Music. Type exactly `RESET` to acknowledge that existing files stay where they are and apply the displayed paths. Press Enter to cancel. Run as your own account.
+
+For the CLI, preview first:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Set-ICloudFolders.ps1 -ResetToDefaults
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Set-ICloudFolders.ps1 -ResetToDefaults -Apply -AllowExistingContent
+```
+
+Defaults are beneath `%USERPROFILE%`: Desktop, Documents, Pictures, Videos, Downloads, Music, and `Videos\Captures`. Aliases use the same destinations. The operation covers only this project's mappings; OneDrive-specific entries and unrelated profile settings remain untouched. It requires no iCloud root or sign-in and cannot be combined with `-ICloudRoot`, `-VerifiedSyncRoot`, `-IncludeMusic` or `-RestoreBackup`.
+
+Reset changes folder pointers only. Files in iCloud stay there; they will not automatically appear in the new local folders. Review and copy content separately if needed. CLI apply requires `-AllowExistingContent` when a changing source contains files; the Explorer `RESET` acknowledgement accepts leaving that content in place. Preview and `-WhatIf` remain read-only. Missing local destinations are created only after apply is approved. The same exact backup and rollback protections apply, and `-RestoreBackup` can undo a reset. Sign out/in after applying and verify Explorer and applications. Existing policies or another sync provider may reapply their own locations.
+
+Reset has local fake-registry coverage; real Windows reset integration must pass in the disposable CI guests before that behavior is considered verified there. The previous cloud round-trip result applies to the iCloud setup, not to local defaults.
+
+### Recovery records
+
 Before any registry write, the tool saves and verifies:
 
 ```text

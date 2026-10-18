@@ -8,9 +8,12 @@ try {
     Copy-Item -LiteralPath (Join-Path $repo 'Open-ICloudFolderSetup.ps1') -Destination $fixture
     @'
 function Invoke-ICloudFolders {
-    param([switch]$Apply)
+    param([switch]$Apply,[switch]$ResetToDefaults,[switch]$AllowExistingContent)
     $phase = if ($Apply) { 'apply' } else { 'preview' }
-    Add-Content -LiteralPath (Join-Path $PSScriptRoot 'calls.txt') -Value $phase
+    $call = $phase
+    if ($ResetToDefaults) { $call = 'reset-' + $phase }
+    if ($AllowExistingContent) { $call += '-reviewed' }
+    Add-Content -LiteralPath (Join-Path $PSScriptRoot 'calls.txt') -Value $call
     $mode = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'mode.txt')
     if ($mode -eq ($phase + '-fails')) { throw 'Injected launcher failure' }
 }
@@ -21,7 +24,12 @@ Export-ModuleMember -Function Invoke-ICloudFolders
         @{Name='explicit apply';Input='APPLY';Mode='ok';ExpectedCalls='preview,apply';Exit=0},
         @{Name='other input cancels';Input='yes';Mode='ok';ExpectedCalls='preview';Exit=0},
         @{Name='preview failure stops';Input='APPLY';Mode='preview-fails';ExpectedCalls='preview';Exit=1},
-        @{Name='apply failure reported';Input='APPLY';Mode='apply-fails';ExpectedCalls='preview,apply';Exit=1}
+        @{Name='apply failure reported';Input='APPLY';Mode='apply-fails';ExpectedCalls='preview,apply';Exit=1},
+        @{Name='reset cancels';Input='';Mode='ok';ExpectedCalls='reset-preview';Exit=0;Reset=$true},
+        @{Name='reset requires exact RESET';Input='APPLY';Mode='ok';ExpectedCalls='reset-preview';Exit=0;Reset=$true},
+        @{Name='explicit reset acknowledges retained files';Input='RESET';Mode='ok';ExpectedCalls='reset-preview,reset-apply-reviewed';Exit=0;Reset=$true},
+        @{Name='reset preview failure stops';Input='RESET';Mode='preview-fails';ExpectedCalls='reset-preview';Exit=1;Reset=$true},
+        @{Name='reset apply failure reported';Input='RESET';Mode='apply-fails';ExpectedCalls='reset-preview,reset-apply-reviewed';Exit=1;Reset=$true}
     )
     foreach ($case in $cases) {
         $calls = Join-Path $fixture 'calls.txt'
@@ -30,6 +38,7 @@ Export-ModuleMember -Function Invoke-ICloudFolders
         $processInfo = New-Object Diagnostics.ProcessStartInfo
         $processInfo.FileName = 'powershell.exe'
         $processInfo.Arguments = '-NoProfile -ExecutionPolicy Bypass -File "' + (Join-Path $fixture 'Open-ICloudFolderSetup.ps1') + '"'
+        if ($case.Reset) { $processInfo.Arguments += ' -ResetToDefaults' }
         $processInfo.UseShellExecute = $false
         $processInfo.CreateNoWindow = $true
         $processInfo.RedirectStandardInput = $true
@@ -57,7 +66,7 @@ Export-ModuleMember -Function Invoke-ICloudFolders
         $process.Dispose()
         Write-Host "PASS: $($case.Name)"
     }
-    Write-Host '5 Explorer launcher checks passed; no user-folder settings accessed.'
+    Write-Host '10 Explorer launcher checks passed; no user-folder settings accessed.'
 } finally {
     $resolved = [IO.Path]::GetFullPath($fixture)
     if ($resolved.StartsWith([IO.Path]::GetFullPath($repo).TrimEnd('\') + '\.test-explorer-', [StringComparison]::OrdinalIgnoreCase)) {
