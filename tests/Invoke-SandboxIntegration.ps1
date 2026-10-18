@@ -64,6 +64,8 @@ try {
     # A fresh process avoids .NET known-folder caching in this test process.
     $actualDocs = & powershell.exe -NoProfile -Command "[Environment]::GetFolderPath('MyDocuments')"
     Check ($actualDocs -ceq (Join-Path $root 'Documents')) 'fresh-process Documents API resolves redirected path'
+    & powershell.exe -STA -NoProfile -ExecutionPolicy Bypass -File (Join-Path $source 'tests\Test-SaveDialog.ps1') -ExpectedDirectory (Join-Path $root 'Documents') -ResultPath (Join-Path $output 'save-dialog.json')
+    Check ($LASTEXITCODE -eq 0) 'real Windows Save dialog defaults to redirected Documents'
     & powershell.exe -NoProfile -Command "[IO.File]::WriteAllText([IO.Path]::Combine([Environment]::GetFolderPath('MyDocuments'),'application-save.txt'),'saved through the Windows Documents API')"
     Check ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath (Join-Path $root 'Documents\application-save.txt'))) 'application-style save uses redirected Documents'
     # Query from a fresh process; Windows Shell caches folder resolutions per process.
