@@ -35,7 +35,13 @@ Export-ModuleMember -Function Invoke-ICloudFolders
         $processInfo.RedirectStandardInput = $true
         $processInfo.RedirectStandardOutput = $true
         $processInfo.RedirectStandardError = $true
-        $process = [Diagnostics.Process]::Start($processInfo)
+        # .NET Framework creates StandardInput with Console.InputEncoding and flushes
+        # its preamble during Process.Start. Set a BOM-free encoding before starting.
+        $originalInputEncoding = [Console]::InputEncoding
+        try {
+            [Console]::InputEncoding = New-Object Text.UTF8Encoding($false)
+            $process = [Diagnostics.Process]::Start($processInfo)
+        } finally { [Console]::InputEncoding = $originalInputEncoding }
         # Write raw BOM-free bytes: runner console encodings may otherwise prefix APPLY with U+FEFF.
         $inputBytes = [Text.Encoding]::ASCII.GetBytes($case.Input + "`r`n")
         $process.StandardInput.BaseStream.Write($inputBytes, 0, $inputBytes.Length)

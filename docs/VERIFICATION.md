@@ -51,6 +51,8 @@ Deleting the test file propagates through iCloud. No source data or unrelated fi
 
 Microsoft documents [SHSetKnownFolderPath](https://learn.microsoft.com/en-us/windows/win32/api/shlobj_core/nf-shlobj_core-shsetknownfolderpath) for redirection. Our isolated evaluation records which registry values it changes, confirms the canonical path, retains a source file, and verifies exact restoration. The production backend remains scoped registry writes until those results establish that an API backend can also preserve all local aliases, originally absent values and recovery guarantees. An API call alone is not assumed equivalent to updating every alias.
 
+The first measured CI evaluations on Server 2022 and Server 2025 changed `Personal` in both User Shell Folders and Shell Folders, retained the source file, and restored both complete snapshots exactly. They did not add local aliases. The evaluation also seeds an existing local Documents alias and records whether it follows the API change. A replacement backend would need an expanded backup surface for Shell Folders and separate alias handling. Keeping the current backend preserves its tested recovery scope while the API experiment remains reproducible.
+
 ## Signing
 
 No usable code-signing certificate was available on the development account when this work began. Unsigned packages are explicitly marked `Signed: false` in their manifest. Checksums detect accidental download changes; they are not a substitute for publisher identity.

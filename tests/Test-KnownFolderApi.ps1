@@ -37,6 +37,7 @@ $before = @($keys | ForEach-Object { Snapshot-Key $_ })
 $beforeJson = $before | ConvertTo-Json -Depth 8 -Compress
 $id = [guid]'FDD39AD0-238F-46AF-ADB4-6C85480369C7'
 $originalPath = Read-ApiPath $id
+$aliasName = '{F42EE2D3-909F-4907-8871-4C22FC0BF756}'
 $target = Join-Path $env:TEMP ('ICloudApi-' + [guid]::NewGuid().ToString('N'))
 $null = [IO.Directory]::CreateDirectory($originalPath)
 $null = [IO.Directory]::CreateDirectory($target)
@@ -46,19 +47,25 @@ $failure = $null
 $restoreErrors = @()
 $changedNames = @()
 try {
+    # Evaluate the important case where a local Documents alias already exists.
+    $aliasKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($keys[0],$true)
+    try { $aliasKey.SetValue($aliasName,$originalPath,[Microsoft.Win32.RegistryValueKind]::ExpandString) } finally { $aliasKey.Dispose() }
+    $apiBefore = @($keys | ForEach-Object { Snapshot-Key $_ })
     $result = [KnownFolderEvaluation]::SHSetKnownFolderPath([ref]$id,0,[IntPtr]::Zero,$target)
     if ($result -ne 0) { throw "SHSetKnownFolderPath failed: $result" }
     if ((Read-ApiPath $id) -ine $target) { throw 'API destination did not resolve.' }
     if (-not (Test-Path -LiteralPath $sourceFile) -or (Test-Path -LiteralPath (Join-Path $target ([IO.Path]::GetFileName($sourceFile))))) { throw 'Unexpected file migration.' }
     $after = @($keys | ForEach-Object { Snapshot-Key $_ })
     for ($i=0;$i -lt $before.Count;$i++) {
-        $names = @(@($before[$i].Values.Name) + @($after[$i].Values.Name) | Select-Object -Unique)
+        $names = @(@($apiBefore[$i].Values.Name) + @($after[$i].Values.Name) | Select-Object -Unique)
         foreach ($name in $names) {
-            $old = @($before[$i].Values | Where-Object { $_.Name -ceq $name }) | ConvertTo-Json -Depth 5 -Compress
+            $old = @($apiBefore[$i].Values | Where-Object { $_.Name -ceq $name }) | ConvertTo-Json -Depth 5 -Compress
             $new = @($after[$i].Values | Where-Object { $_.Name -ceq $name }) | ConvertTo-Json -Depth 5 -Compress
             if ($old -cne $new) { $changedNames += $before[$i].Path + '\' + $name }
         }
     }
+    $aliasAfter = @($after[0].Values | Where-Object { $_.Name -ceq $aliasName })
+    $aliasFollowsApi = $aliasAfter.Count -eq 1 -and [Environment]::ExpandEnvironmentVariables($aliasAfter[0].Data) -ieq $target
 } catch { $failure = $_ | Out-String } finally {
     try { $null = [KnownFolderEvaluation]::SHSetKnownFolderPath([ref]$id,0,[IntPtr]::Zero,$originalPath) } catch { $restoreErrors += $_.Exception.Message }
     foreach ($snapshot in $before) {
@@ -72,7 +79,7 @@ try {
     }
     $restored = @($keys | ForEach-Object { Snapshot-Key $_ }) | ConvertTo-Json -Depth 8 -Compress
     $exactRestore = $restored -ceq $beforeJson
-    [pscustomobject]@{ Success=($null -eq $failure -and $restoreErrors.Count -eq 0 -and $exactRestore); ApiCanonicalPathVerified=($null -eq $failure); SourceFileRetained=(Test-Path -LiteralPath $sourceFile); ChangedRegistryValues=$changedNames; ExactRestore=$exactRestore; Errors=@($failure)+$restoreErrors; OS=[Environment]::OSVersion.VersionString; PowerShell=$PSVersionTable.PSVersion.ToString() } |
+    [pscustomobject]@{ Success=($null -eq $failure -and $restoreErrors.Count -eq 0 -and $exactRestore); ApiCanonicalPathVerified=($null -eq $failure); LocalAliasFollowsApi=$aliasFollowsApi; SourceFileRetained=(Test-Path -LiteralPath $sourceFile); ChangedRegistryValues=$changedNames; ExactRestore=$exactRestore; Errors=@(@($failure)+$restoreErrors | Where-Object {$_}); OS=[Environment]::OSVersion.VersionString; PowerShell=$PSVersionTable.PSVersion.ToString() } |
         ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $output 'known-folder-api.json') -Encoding UTF8
 }
 if ($failure -or $restoreErrors.Count -or -not $exactRestore) { throw 'Known Folder API evaluation failed; inspect known-folder-api.json.' }
