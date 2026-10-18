@@ -1,16 +1,14 @@
 #requires -Version 5.1
-# Launched only by the isolated Windows Sandbox configuration.
+# Real writes are restricted to disposable Sandbox/hosted-runner environments.
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
-$marker = Get-Content -LiteralPath 'C:\TestInput\sandbox-marker.json' -Raw | ConvertFrom-Json
-$sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-if ($env:USERNAME -ne 'WDAGUtilityAccount' -or $sid -eq $marker.HostSid -or $env:COMPUTERNAME -eq $marker.HostComputer) {
-    throw 'This integration test is restricted to the disposable Windows Sandbox guest.'
-}
-$output = 'C:\TestResults'
-$project = 'C:\SandboxProject'
+$mode = & (Join-Path $PSScriptRoot 'Assert-IsolatedEnvironment.ps1')
+$output = if ($mode -eq 'WindowsSandbox') { 'C:\TestResults' } else { Join-Path $env:RUNNER_TEMP 'ICloudIntegrationResults' }
+$project = if ($mode -eq 'WindowsSandbox') { 'C:\SandboxProject' } else { Join-Path $env:RUNNER_TEMP 'ICloudIntegrationProject' }
+$source = if ($mode -eq 'WindowsSandbox') { 'C:\TestInput' } else { Split-Path $PSScriptRoot -Parent }
+$null = [IO.Directory]::CreateDirectory($output)
 $null = [IO.Directory]::CreateDirectory($project)
-Copy-Item -LiteralPath 'C:\TestInput\Set-ICloudFolders.ps1','C:\TestInput\ICloudFolders.psm1' -Destination $project
+Copy-Item -LiteralPath (Join-Path $source 'Set-ICloudFolders.ps1'),(Join-Path $source 'ICloudFolders.psm1') -Destination $project
 $script:checks = @()
 $script:backupPath = $null
 $script:failure = $null
@@ -46,7 +44,7 @@ try {
     $oldDocs = & $module { (Read-FolderValue 'Personal').Data }
     $sentinel = Join-Path ([Environment]::ExpandEnvironmentVariables($oldDocs)) 'integration-original.txt'
     [IO.File]::WriteAllText($sentinel, 'source must remain unchanged')
-    $root = 'C:\ICloudIntegration !'
+    $root = Join-Path $project 'ICloudIntegration !'
     $null = [IO.Directory]::CreateDirectory($root)
     $recovery = Join-Path $env:LOCALAPPDATA 'ICloudFolderSettler\Recovery'
     Run-Cli 'preview' @('-ICloudRoot',$root,'-IncludeMusic')
@@ -66,6 +64,10 @@ try {
     # A fresh process avoids .NET known-folder caching in this test process.
     $actualDocs = & powershell.exe -NoProfile -Command "[Environment]::GetFolderPath('MyDocuments')"
     Check ($actualDocs -ceq (Join-Path $root 'Documents')) 'fresh-process Documents API resolves redirected path'
+    & powershell.exe -NoProfile -Command "[IO.File]::WriteAllText([IO.Path]::Combine([Environment]::GetFolderPath('MyDocuments'),'application-save.txt'),'saved through the Windows Documents API')"
+    Check ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath (Join-Path $root 'Documents\application-save.txt'))) 'application-style save uses redirected Documents'
+    $diagnostics = Test-ICloudFolderSetup -ICloudRoot $root -IncludeMusic
+    Check (@($diagnostics.RegistryValues | Where-Object { -not $_.Matches }).Count -eq 0 -and @($diagnostics.ResolvedFolders | Where-Object { -not $_.Matches }).Count -eq 0) 'diagnostics agree with all guest registry and resolved paths'
     Run-Cli 'restore-preview' @('-RestoreBackup',$script:backupPath)
     Check ((Snapshot) -ceq $applied) 'restore preview leaves settings unchanged'
     Run-Cli 'restore' @('-RestoreBackup',$script:backupPath,'-Apply')
@@ -89,6 +91,52 @@ try {
     Check ($caught -like '*Sandbox injected write failure*Original settings retained/restored*') 'partial real-write failure triggers successful rollback'
     Check ((Snapshot) -ceq $before) 'real rollback exactly matches original registry snapshot'
     Check ([IO.File]::ReadAllText($sentinel) -ceq 'source must remain unchanged') 'source file survives apply, restore and rollback'
+
+    # Real filesystem denial, not a mocked probe failure.
+    $deniedPath = Join-Path $root 'Pictures'
+    $originalAcl = Get-Acl -LiteralPath $deniedPath
+    try {
+        $acl = Get-Acl -LiteralPath $deniedPath
+        $rule = New-Object Security.AccessControl.FileSystemAccessRule([Security.Principal.WindowsIdentity]::GetCurrent().User,'Write','Deny')
+        $null = $acl.AddAccessRule($rule)
+        Set-Acl -LiteralPath $deniedPath -AclObject $acl
+        $caught = $null
+        try { Invoke-ICloudFolders -ICloudRoot $root -IncludeMusic -Apply -AllowExistingContent -VerifiedSyncRoot *> (Join-Path $output 'access-denied.log') } catch { $caught = $_.Exception.Message }
+        Check ($null -ne $caught -and (Snapshot) -ceq $before) 'real destination access denial leaves registry unchanged'
+    } finally { Set-Acl -LiteralPath $deniedPath -AclObject $originalAcl }
+
+    # Terminate a separate process after its first real write; recover using its on-disk backup.
+    $crashRoot = Join-Path $project 'crash-root'
+    $null = [IO.Directory]::CreateDirectory($crashRoot)
+    $ready = Join-Path $project 'crash-ready.txt'
+    $crashScript = Join-Path $project 'crash-test.ps1'
+    @'
+$ErrorActionPreference='Stop'
+$module=Import-Module (Join-Path $PSScriptRoot 'ICloudFolders.psm1') -Force -PassThru
+& $module {
+    param($Ready)
+    $script:OriginalCrashWrite=(Get-Item Function:Write-FolderValue).ScriptBlock
+    $script:CrashReady=$Ready
+    function script:Write-FolderValue {
+        param($Value)
+        & $script:OriginalCrashWrite $Value
+        [IO.File]::WriteAllText($script:CrashReady,'first write completed')
+        Start-Sleep -Seconds 600
+    }
+} (Join-Path $PSScriptRoot 'crash-ready.txt')
+Invoke-ICloudFolders -ICloudRoot (Join-Path $PSScriptRoot 'crash-root') -IncludeMusic -Apply -AllowExistingContent -VerifiedSyncRoot
+'@ | Set-Content -LiteralPath $crashScript -Encoding UTF8
+    $priorBackups = @(Get-ChildItem -LiteralPath $recovery -Recurse -Filter before.json | Select-Object -ExpandProperty FullName)
+    $child = Start-Process powershell.exe -ArgumentList ('-NoProfile -ExecutionPolicy Bypass -File "'+$crashScript+'"') -WindowStyle Hidden -PassThru
+    try {
+        $deadline = (Get-Date).AddSeconds(30)
+        while (-not (Test-Path -LiteralPath $ready) -and -not $child.HasExited -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 200 }
+        Check ((Test-Path -LiteralPath $ready) -and (Snapshot) -cne $before) 'interrupted process performed a real write before termination'
+    } finally { if (-not $child.HasExited) { Stop-Process -Id $child.Id -Force; $child.WaitForExit() }; $child.Dispose() }
+    $crashBackup = @(Get-ChildItem -LiteralPath $recovery -Recurse -Filter before.json | Where-Object { $priorBackups -notcontains $_.FullName })
+    Check ($crashBackup.Count -eq 1) 'interrupted process left one recoverable backup'
+    Run-Cli 'crash-restore' @('-RestoreBackup',$crashBackup[0].FullName,'-Apply')
+    Check ((Snapshot) -ceq $before) 'manual recovery after process termination restores exact original settings'
 } catch {
     $script:failure = $_ | Out-String
 } finally {
@@ -102,3 +150,4 @@ try {
         Limits='Synthetic guest root; no iCloud installation, cloud sync or sign-out/sign-in verification.'
     } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $output 'result.json') -Encoding UTF8
 }
+if ($script:failure) { throw $script:failure }

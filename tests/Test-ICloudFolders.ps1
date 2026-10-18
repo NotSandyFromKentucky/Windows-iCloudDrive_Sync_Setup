@@ -151,6 +151,52 @@ try {
     & $module { $script:RegisteredRoots = @() }
     Expect-Failure { Invoke-ICloudFolders -ICloudRoot $cloud -Apply -VerifiedSyncRoot -AllowExistingContent } 'ROLLBACK INCOMPLETE'
     Pass 'rollback failure is reported with recovery information'
+
+    # Validation must remain before writes even for damaged/untrusted backups.
+    $writeCount = & $module { $script:WriteCount }
+    $bad = Get-Content -LiteralPath $original -Raw | ConvertFrom-Json
+    $bad.Values = @($bad.Values) + @($bad.Values[0])
+    $bad | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $invalidPath -Encoding UTF8
+    Expect-Failure { Invoke-ICloudFolders -RestoreBackup $invalidPath -Apply } 'duplicate'
+    $bad = Get-Content -LiteralPath $original -Raw | ConvertFrom-Json
+    $bad.Values[0].Kind = 'DWord'
+    $bad | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $invalidPath -Encoding UTF8
+    Expect-Failure { Invoke-ICloudFolders -RestoreBackup $invalidPath -Apply } 'Invalid registry value'
+    $bad = Get-Content -LiteralPath $original -Raw | ConvertFrom-Json
+    $bad.Values[0].Data = Join-Path $testRoot 'missing-original-path'
+    $bad | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $invalidPath -Encoding UTF8
+    Expect-Failure { Invoke-ICloudFolders -RestoreBackup $invalidPath -Apply } 'Restore destination is unavailable'
+    '{invalid JSON' | Set-Content -LiteralPath $invalidPath
+    Expect-Failure { Invoke-ICloudFolders -RestoreBackup $invalidPath -Apply } ''
+    Assert ((& $module { $script:WriteCount }) -eq $writeCount) 'Invalid backup changed settings'
+    Pass 'duplicate, invalid-type, unavailable-path and malformed backups are rejected before writes'
+
+    $savedRead = & $module { (Get-Item Function:Read-FolderValue).ScriptBlock }
+    & $module { function script:Read-FolderValue { param($Name) throw 'Injected registry access denied' } }
+    Expect-Failure { Invoke-ICloudFolders -ICloudRoot $cloud -Apply -VerifiedSyncRoot } 'registry access denied'
+    & $module { param($Original) Set-Item Function:script:Read-FolderValue -Value $Original } $savedRead
+    Assert ((& $module { $script:WriteCount }) -eq $writeCount) 'Registry read failure changed settings'
+    Pass 'registry access failure stops before writes'
+
+    $savedWrite = & $module { (Get-Item Function:Write-FolderValue).ScriptBlock }
+    & $module {
+        $script:FailAt = 0
+        $script:CorruptOnce = $true
+        function script:Write-FolderValue {
+            param($Value)
+            $script:WriteCount++
+            if ($Value.Exists) {
+                $data = $Value.Data
+                if ($script:CorruptOnce) { $script:CorruptOnce = $false; $data += '-corrupted' }
+                $script:Fake[$Value.Name] = [pscustomobject]@{ Name=$Value.Name; Exists=$true; Kind=$Value.Kind; Data=$data }
+            } else { $script:Fake.Remove($Value.Name) }
+        }
+    }
+    $snapshot = & $module { @($script:Fake.Keys | Sort-Object | ForEach-Object { $script:Fake[$_] }) | ConvertTo-Json -Depth 6 -Compress }
+    Expect-Failure { Invoke-ICloudFolders -ICloudRoot $cloud -Apply -VerifiedSyncRoot -AllowExistingContent } 'Read-back mismatch'
+    Assert ((& $module { @($script:Fake.Keys | Sort-Object | ForEach-Object { $script:Fake[$_] }) | ConvertTo-Json -Depth 6 -Compress }) -ceq $snapshot) 'Read-back mismatch failed to restore prior snapshot'
+    & $module { param($Original) Set-Item Function:script:Write-FolderValue -Value $Original } $savedWrite
+    Pass 'read-back corruption is detected and rolled back'
     Write-Host "$script:passed tests passed. No user-shell registry values were written."
 } finally {
     Remove-Module $module -Force

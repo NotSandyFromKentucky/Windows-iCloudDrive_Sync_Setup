@@ -6,6 +6,8 @@ This repository contains a per-user Windows folder-path configurator for iCloud 
 
 `Open-ICloudFolderSetup.cmd` is the Explorer entry point. It runs `Open-ICloudFolderSetup.ps1` using a process-only execution-policy override, then pauses and returns the script's exit code. The script previews first, applies only after an exact `APPLY` response, and stops on preview/apply errors. It uses the same module without changing mappings or bypassing any preflight checks. Advanced options remain on the CLI. The original CLI launchers retain their unattended behavior.
 
+Version 2.1 adds `Test-ICloudFolders.ps1` and `Check-ICloudFolderSetup.cmd` for read-only diagnostics. They report root registration, mappings, destination existence and Windows folder resolution, with explicit unknown cloud status. Friendly plan labels are derived from `Get-FolderMap`; raw value names remain available in JSON diagnostics. See `docs/VERIFICATION.md` for the full validation and signing policy.
+
 The Explorer wrapper passed five isolated checks using a stub module: cancel, explicit apply, other input cancelling, preview failure preventing apply, and apply failure returning a nonzero exit code. The existing 16 regression scenarios also passed after adding the wrapper. No live host-account apply was used to test the launcher.
 
 ## Decisions
@@ -59,8 +61,8 @@ No live host-account folder redirection is part of development verification. Reg
 
 ## Releases
 
-The legacy GitHub release uses the tag `Release`; preserve it. Versioned distribution starts with `v2.0.0` because the old batch entry point is replaced by a multi-file PowerShell utility. There is no automatic GitHub Actions release workflow. A push to `main` alone does not publish a release.
+The legacy GitHub release uses the tag `Release`; preserve it and `v2.0.0`. Versioned distribution started with `v2.0.0` because the old batch entry point was replaced by a multi-file PowerShell utility. Version 2.1 introduces CI and automated version-tag publication. A push to `main` runs validation; only a version tag (or manual release workflow on an already tagged commit) can publish a release.
 
-For a release, commit and test the intended source, build the ZIP from that exact Git commit using `git archive` with a runtime/documentation allowlist, verify its extracted contents and launcher cancellation path, and generate `SHA256SUMS.txt`. Include `ICloudFolders.psm1`, both `Set-ICloudFolders` launchers, both `Open-ICloudFolderSetup` launchers, `README.md`, `CHANGELOG.md`, and this context file under one versioned top-level folder. Never package `.local`, IDE state, credentials, personal registry snapshots, recovery files, or test output.
+For a release, commit and test the intended source. `tools/New-ReleasePackage.ps1` uses `git archive` with the versioned `build/ReleaseFiles.json` allowlist, optionally signs staged PowerShell files with an existing valid certificate, adds a per-file manifest and generates `SHA256SUMS.txt`. `tools/Test-ReleasePackage.ps1` verifies contents, hashes, syntax and declared signatures. Never package `.local`, IDE state, credentials, personal registry snapshots, recovery files, or test output.
 
-Create an immutable version tag on that commit, upload the ZIP and checksum to a draft GitHub release, verify the uploaded bytes and notes, then publish. Use the corresponding changelog section as release notes. Do not move a published tag or replace the legacy release.
+Create an immutable version tag on that commit. `.github/workflows/release.yml` calls the full Windows validation workflow, then `tools/Publish-Release.ps1` creates/resumes a draft, uploads the ZIP/checksum, downloads and verifies both assets, and publishes using the corresponding changelog section. It refuses to modify a published version. The default token is read-only; only publication receives contents-write. Action dependencies are pinned to official commit IDs.

@@ -1,0 +1,15 @@
+[
+  "ICloudFolders.psm1",
+  "Set-ICloudFolders.ps1",
+  "Set-ICloudFolders.cmd",
+  "Open-ICloudFolderSetup.ps1",
+  "Open-ICloudFolderSetup.cmd",
+  "Test-ICloudFolders.ps1",
+  "Check-ICloudFolderSetup.cmd",
+  "README.md",
+  "CHANGELOG.md",
+  "VERSION",
+  "docs/CONTEXT.md",
+  "docs/VERIFICATION.md",
+  "tools/Test-ICloudRoundTrip.ps1"
+]

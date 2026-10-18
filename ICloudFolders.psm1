@@ -29,6 +29,65 @@ function Get-FolderMap {
 function Get-UserSid { [Security.Principal.WindowsIdentity]::GetCurrent().User.Value }
 function Get-RecoveryRoot { Get-NormalPath (Join-Path $env:LOCALAPPDATA 'ICloudFolderSettler\Recovery') }
 
+function Get-FolderLabel {
+    param([string]$Name)
+    $map = Get-FolderMap -IncludeMusic
+    if (-not $map.Contains($Name)) { return $Name }
+    $folder = if ($map[$Name] -eq 'Videos\Captures') { 'Captures' } else { $map[$Name] }
+    $canonicalIds = @('{374DE290-123F-4565-9164-39C4925E467B}','{EDC0FE71-98D8-4F4A-B920-C8DC133CB165}')
+    if ($Name.StartsWith('{') -and $Name -notin $canonicalIds) { return "$folder (local alias)" }
+    $folder
+}
+
+function Get-ResolvedFolderPath {
+    param([string]$Folder)
+    $special = @{ Desktop='DesktopDirectory'; Documents='MyDocuments'; Pictures='MyPictures'; Videos='MyVideos'; Music='MyMusic' }
+    if ($special.ContainsKey($Folder)) { return [Environment]::GetFolderPath($special[$Folder]) }
+    $shell = $null
+    try {
+        $shell = New-Object -ComObject Shell.Application
+        $name = if ($Folder -eq 'Videos\Captures') { 'Captures' } else { $Folder }
+        $namespace = $shell.Namespace('shell:' + $name)
+        if ($namespace) { return $namespace.Self.Path }
+        return $null
+    } finally { if ($shell) { $null = [Runtime.InteropServices.Marshal]::ReleaseComObject($shell) } }
+}
+
+function Test-ICloudFolderSetup {
+    [CmdletBinding()]
+    param([string]$ICloudRoot = "$env:USERPROFILE\iCloudDrive", [switch]$IncludeMusic)
+    $root = Get-NormalPath $ICloudRoot
+    $map = Get-FolderMap -IncludeMusic:$IncludeMusic
+    $registered = @(Get-RegisteredICloudRoots)
+    $errors = @()
+    $rows = foreach ($name in $map.Keys) {
+        $expected = Join-Path $root $map[$name]
+        $value = $null
+        try { $value = Read-FolderValue $name } catch { $errors += $_.Exception.Message }
+        $current = if ($value -and $value.Exists) { [Environment]::ExpandEnvironmentVariables($value.Data) } else { $null }
+        [pscustomobject]@{
+            Folder=(Get-FolderLabel $name); ValueName=$name; Current=$current; Expected=$expected
+            Matches=($null -ne $current -and $current -ieq $expected)
+            DirectoryExists=(Test-Path -LiteralPath $expected -PathType Container)
+        }
+    }
+    $resolved = foreach ($folder in @($map.Values | Select-Object -Unique)) {
+        $path = $null
+        try { $path = Get-ResolvedFolderPath $folder } catch { $errors += $_.Exception.Message }
+        $expected = Join-Path $root $folder
+        [pscustomobject]@{ Folder=$folder; Current=$path; Expected=$expected; Matches=($null -ne $path -and $path -ieq $expected) }
+    }
+    $rootExists = Test-Path -LiteralPath $root -PathType Container
+    $rootRegistered = $registered -contains $root
+    [pscustomobject]@{
+        Healthy=($rootExists -and $rootRegistered -and @($rows | Where-Object { -not $_.Matches -or -not $_.DirectoryExists }).Count -eq 0 -and @($resolved | Where-Object { -not $_.Matches }).Count -eq 0 -and $errors.Count -eq 0)
+        Root=$root; RootExists=$rootExists; RootRegistered=$rootRegistered; RegisteredRoots=$registered
+        UserSid=(Get-UserSid); PowerShellVersion=$PSVersionTable.PSVersion.ToString()
+        RegistryValues=@($rows); ResolvedFolders=@($resolved); Errors=$errors
+        CloudSync='Not verified by this read-only check.'
+    }
+}
+
 function Get-RegisteredICloudRoots {
     $base = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey('SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\SyncRootManager')
     if (-not $base) { return }
@@ -203,9 +262,10 @@ function Invoke-ICloudFolders {
         $destinations = @($destinations | Select-Object -Unique)
         foreach ($path in $destinations) { Assert-DirectoryPath $path }
         $plan = for ($i=0; $i -lt $desired.Count; $i++) {
-            [pscustomobject]@{ Name=$desired[$i].Name; Current=$before[$i].Data; Proposed=$desired[$i].Data; ExistsAfter=$desired[$i].Exists }
+            $action = if (-not $desired[$i].Exists) { 'Remove value' } elseif (-not $before[$i].Exists) { 'Add missing value' } elseif ($before[$i].Data -ceq $desired[$i].Data -and $before[$i].Kind -ceq $desired[$i].Kind) { 'Already configured' } else { 'Update value' }
+            [pscustomobject]@{ Folder=(Get-FolderLabel $desired[$i].Name); Current=$before[$i].Data; Proposed=$desired[$i].Data; Action=$action }
         }
-        $plan | Format-List Name, Current, Proposed, ExistsAfter | Out-Host
+        $plan | Format-List Folder, Current, Proposed, Action | Out-Host
         foreach ($message in @($contentWarnings | Select-Object -Unique)) { Write-Warning $message }
         if (-not $Apply) { Write-Host 'Preview only. Use -Apply to change settings. No files are moved.'; return }
         if ($contentWarnings.Count) { throw 'Existing source content requires review. See the warnings above.' }
@@ -265,4 +325,4 @@ function Invoke-ICloudFolders {
     }
 }
 
-Export-ModuleMember -Function Invoke-ICloudFolders
+Export-ModuleMember -Function Invoke-ICloudFolders, Test-ICloudFolderSetup

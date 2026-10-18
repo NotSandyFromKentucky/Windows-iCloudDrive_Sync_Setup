@@ -4,7 +4,7 @@ Preview and redirect selected Windows user folders into an existing iCloud Drive
 
 ## Download
 
-Get **`Windows-iCloudDrive_Sync_Setup-v2.0.0.zip`** from the [v2.0.0 release](https://github.com/NotSandyFromKentucky/Windows-iCloudDrive_Sync_Setup/releases/tag/v2.0.0), extract the entire ZIP, and double-click `Open-ICloudFolderSetup.cmd` inside the extracted folder. Keep the scripts together; the launcher needs its accompanying PowerShell module and script. The release includes `SHA256SUMS.txt` for checking the download.
+Get the versioned ZIP from [GitHub Releases](https://github.com/NotSandyFromKentucky/Windows-iCloudDrive_Sync_Setup/releases/latest), extract the entire ZIP, and double-click `Open-ICloudFolderSetup.cmd` inside the extracted folder. Keep the scripts together; the launcher needs its accompanying PowerShell module and script. Each release includes `SHA256SUMS.txt` for checking the download. Starting with v2.1.0, packages also contain a per-file manifest and signature state.
 
 See [CHANGELOG.md](CHANGELOG.md) for changes from the legacy batch release.
 
@@ -21,6 +21,17 @@ Windows PowerShell 5.1 is the tested runtime. Windows/iCloud integration still r
 Double-click **`Open-ICloudFolderSetup.cmd`**. It displays the default preview and asks you to type `APPLY` before changing settings. Press Enter to cancel. The window stays open afterward so you can read the result and backup path. Run it normally as your own account; administrator access is unnecessary.
 
 This launcher uses an execution-policy override for its PowerShell process only. It uses the default root and leaves Music off. Existing-content and root-validation checks still apply; use the CLI options below if you need a custom root or have reviewed content that must remain in its old location.
+
+## Check an existing setup
+
+Double-click `Check-ICloudFolderSetup.cmd` for read-only diagnostics, or run:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Test-ICloudFolders.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Test-ICloudFolders.ps1 -Json
+```
+
+This checks root registration, mappings, existing destination folders and Windows folder resolution. Exit code 0 means the checks passed, 2 means configuration needs attention, and 1 means an execution error. It does not prove cloud synchronization. See [verification guidance](docs/VERIFICATION.md) for an explicit two-way sync test, platform coverage, API evaluation and signing limits.
 
 ## Preview
 
@@ -118,6 +129,7 @@ Preflight failures are printed to the console. Logs start only after apply is ap
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-ICloudFolders.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-ExplorerLauncher.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Diagnostics.ps1
 ```
 
 Tests use an in-memory registry boundary and temporary folders inside this repository. They never write user-shell registry values. See [project context](docs/CONTEXT.md) for architecture, decisions, validation coverage, and integration checks still needed.
