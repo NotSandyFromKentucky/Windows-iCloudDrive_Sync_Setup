@@ -38,6 +38,10 @@ Live round trip passed on 2026-10-18 at 14:11 UTC with iCloud for Windows `15.10
 
 Real-registry integration runs only in disposable Windows Sandbox or GitHub-hosted Windows VMs. The guard refuses self-hosted runners and ordinary developer accounts. It is an accidental-execution guard, not protection against an attacker forging environment variables. Real tests include permission denial, exact restore and process termination after a real write, followed by recovery from the on-disk backup. A separate API experiment evaluates `SHSetKnownFolderPath` and restores both User Shell Folders and Shell Folders snapshots. Evidence is uploaded as CI artifacts.
 
+## Reset to local defaults
+
+Reset feature evidence: [run 39135664146](https://github.com/NotSandyFromKentucky/Windows-iCloudDrive_Sync_Setup/actions/runs/39135664146), commit `3ab6d55`, passed all ten jobs. All six OS/shell suites passed 24 core, ten launcher and five diagnostic scenarios. Each disposable image passed 49 integration checks, including mutation-free reset preview/WhatIf, all 13 local-default entries including Music, source-file retention and exact restoration from the reset backup. Package verification also passed. On the development account, only reset preview and WhatIf ran; the complete User Shell Folders snapshot was unchanged. Reset does not move cloud content or establish application refresh after sign-out/sign-in.
+
 ## Real iCloud round trip
 
 This needs an account already signed into iCloud and another device or iCloud.com. Never share Apple passwords or verification codes with automation.

@@ -112,7 +112,7 @@ Defaults are beneath `%USERPROFILE%`: Desktop, Documents, Pictures, Videos, Down
 
 Reset changes folder pointers only. Files in iCloud stay there; they will not automatically appear in the new local folders. Review and copy content separately if needed. CLI apply requires `-AllowExistingContent` when a changing source contains files; the Explorer `RESET` acknowledgement accepts leaving that content in place. Preview and `-WhatIf` remain read-only. Missing local destinations are created only after apply is approved. The same exact backup and rollback protections apply, and `-RestoreBackup` can undo a reset. Sign out/in after applying and verify Explorer and applications. Existing policies or another sync provider may reapply their own locations.
 
-Reset has local fake-registry coverage; real Windows reset integration must pass in the disposable CI guests before that behavior is considered verified there. The previous cloud round-trip result applies to the iCloud setup, not to local defaults.
+Reset passed fake-registry tests and real reset/restore checks on all three disposable Windows CI images in [run 39135664146](https://github.com/NotSandyFromKentucky/Windows-iCloudDrive_Sync_Setup/actions/runs/39135664146). Your account was used only for read-only preview/WhatIf, with the complete registry snapshot unchanged. The previous cloud round-trip result applies to the iCloud setup, not to local defaults. `Check-ICloudFolderSetup.cmd` checks iCloud destinations and will therefore report mismatches after an intentional reset to local defaults.
 
 ### Recovery records
 
