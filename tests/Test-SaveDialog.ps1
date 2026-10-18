@@ -73,7 +73,7 @@ public class SaveTestEvents : ISaveTestEvents {
 }
 
 public static class SaveDialogEvaluation {
-    public static string ObserveDefaultFolder() {
+    public static string ObserveDefaultFolder(string progressPath) {
         ISaveTestDialog dialog=(ISaveTestDialog)new SaveDialogClass();
         Timer timer=new Timer();
         string folderPath=null;
@@ -82,6 +82,7 @@ public static class SaveDialogEvaluation {
         uint cookie=0;
         SaveTestEvents events=new SaveTestEvents();
         try {
+            System.IO.File.WriteAllText(progressPath,"COM dialog created");
             // Deliberately do not set a folder or initial directory.
             dialog.SetTitle("Isolated Save dialog path verification");
             dialog.SetFileName("folder-setup-dialog-verification.txt");
@@ -91,12 +92,15 @@ public static class SaveDialogEvaluation {
                 ISaveTestShellItem folder=null;
                 IntPtr name=IntPtr.Zero;
                 try {
+                    System.IO.File.AppendAllText(progressPath,"\r\nTimer tick");
                     dialog.GetFolder(out folder);
                     folder.GetDisplayName(0x80058000,out name); // SIGDN_FILESYSPATH
                     folderPath=Marshal.PtrToStringUni(name);
-                    timer.Stop();
+                    System.IO.File.AppendAllText(progressPath,"\r\nFolder: "+folderPath);
                     dialog.Close(unchecked((int)0x800704c7)); // normal cancellation
+                    timer.Stop();
                 } catch (Exception ex) {
+                    System.IO.File.AppendAllText(progressPath,"\r\nCallback error: "+ex.Message);
                     if (DateTime.UtcNow >= deadline) {
                         failure=ex;
                         timer.Stop();
@@ -108,6 +112,7 @@ public static class SaveDialogEvaluation {
                 }
             };
             timer.Start();
+            System.IO.File.AppendAllText(progressPath,"\r\nOpening dialog");
             int result=dialog.Show(IntPtr.Zero);
             if (failure!=null) throw failure;
             if (String.IsNullOrEmpty(folderPath)) throw new Exception("Save dialog returned no physical folder; HRESULT="+result);
@@ -124,7 +129,7 @@ public static class SaveDialogEvaluation {
 $actual=$null
 $failure=$null
 try {
-    $actual=[SaveDialogEvaluation]::ObserveDefaultFolder()
+    $actual=[SaveDialogEvaluation]::ObserveDefaultFolder($ResultPath+'.progress.txt')
     if ($actual -ine $ExpectedDirectory) { throw "Default Save dialog folder mismatch. Expected '$ExpectedDirectory'; resolved '$actual'." }
 } catch { $failure=$_.Exception.Message }
 [pscustomobject]@{ Success=($null -eq $failure); Expected=$ExpectedDirectory; Actual=$actual; Error=$failure; Mechanism='Real IFileSaveDialog; initial directory left unset; cancelled through its own COM API; no file saved.' } |

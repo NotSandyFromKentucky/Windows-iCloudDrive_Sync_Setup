@@ -64,8 +64,12 @@ try {
     # A fresh process avoids .NET known-folder caching in this test process.
     $actualDocs = & powershell.exe -NoProfile -Command "[Environment]::GetFolderPath('MyDocuments')"
     Check ($actualDocs -ceq (Join-Path $root 'Documents')) 'fresh-process Documents API resolves redirected path'
-    & powershell.exe -STA -NoProfile -ExecutionPolicy Bypass -File (Join-Path $source 'tests\Test-SaveDialog.ps1') -ExpectedDirectory (Join-Path $root 'Documents') -ResultPath (Join-Path $output 'save-dialog.json')
-    Check ($LASTEXITCODE -eq 0) 'real Windows Save dialog defaults to redirected Documents'
+    $dialogArguments = '-STA -NoProfile -ExecutionPolicy Bypass -File "'+(Join-Path $source 'tests\Test-SaveDialog.ps1')+'" -ExpectedDirectory "'+(Join-Path $root 'Documents')+'" -ResultPath "'+(Join-Path $output 'save-dialog.json')+'"'
+    $dialogProcess = Start-Process powershell.exe -ArgumentList $dialogArguments -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $output 'save-dialog-output.log') -RedirectStandardError (Join-Path $output 'save-dialog-error.log')
+    try {
+        if (-not $dialogProcess.WaitForExit(45000)) { Stop-Process -Id $dialogProcess.Id -Force; $dialogProcess.WaitForExit(); throw 'Windows Save dialog exceeded its 45-second outer timeout; inspect the progress artifact.' }
+        Check ($dialogProcess.ExitCode -eq 0) 'real Windows Save dialog defaults to redirected Documents'
+    } finally { $dialogProcess.Dispose() }
     & powershell.exe -NoProfile -Command "[IO.File]::WriteAllText([IO.Path]::Combine([Environment]::GetFolderPath('MyDocuments'),'application-save.txt'),'saved through the Windows Documents API')"
     Check ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath (Join-Path $root 'Documents\application-save.txt'))) 'application-style save uses redirected Documents'
     # Query from a fresh process; Windows Shell caches folder resolutions per process.
