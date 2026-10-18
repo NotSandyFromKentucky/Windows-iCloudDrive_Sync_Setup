@@ -2,6 +2,12 @@
 
 Preview and redirect selected Windows user folders into an existing iCloud Drive root. The tool changes paths for the current account; it does not install iCloud, enable synchronization, or move files.
 
+## Download
+
+Get **`Windows-iCloudDrive_Sync_Setup-v2.0.0.zip`** from the [v2.0.0 release](https://github.com/NotSandyFromKentucky/Windows-iCloudDrive_Sync_Setup/releases/tag/v2.0.0), extract the entire ZIP, and double-click `Open-ICloudFolderSetup.cmd` inside the extracted folder. Keep the scripts together; the launcher needs its accompanying PowerShell module and script. The release includes `SHA256SUMS.txt` for checking the download.
+
+See [CHANGELOG.md](CHANGELOG.md) for changes from the legacy batch release.
+
 ## Requirements
 
 - Windows with Windows PowerShell 5.1 and iCloud for Windows already configured.

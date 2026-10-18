@@ -56,3 +56,11 @@ Before deploying to another account/machine, run isolated Windows integration ch
 - Verify existing files remain intact, a test file synchronizes, and manual restore returns the account to its original state. Test PowerShell execution policy and launcher exit codes.
 
 No live host-account folder redirection is part of development verification. Registry/cloud integration results must be recorded when actually performed; do not infer them from the mock tests.
+
+## Releases
+
+The legacy GitHub release uses the tag `Release`; preserve it. Versioned distribution starts with `v2.0.0` because the old batch entry point is replaced by a multi-file PowerShell utility. There is no automatic GitHub Actions release workflow. A push to `main` alone does not publish a release.
+
+For a release, commit and test the intended source, build the ZIP from that exact Git commit using `git archive` with a runtime/documentation allowlist, verify its extracted contents and launcher cancellation path, and generate `SHA256SUMS.txt`. Include `ICloudFolders.psm1`, both `Set-ICloudFolders` launchers, both `Open-ICloudFolderSetup` launchers, `README.md`, `CHANGELOG.md`, and this context file under one versioned top-level folder. Never package `.local`, IDE state, credentials, personal registry snapshots, recovery files, or test output.
+
+Create an immutable version tag on that commit, upload the ZIP and checksum to a draft GitHub release, verify the uploaded bytes and notes, then publish. Use the corresponding changelog section as release notes. Do not move a published tag or replace the legacy release.
