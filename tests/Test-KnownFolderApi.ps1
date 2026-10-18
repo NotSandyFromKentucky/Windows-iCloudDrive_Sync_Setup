@@ -25,10 +25,10 @@ function Snapshot-Key($Path) {
         [pscustomobject]@{ Path=$Path; Exists=$true; Values=$values }
     } finally { if ($key) { $key.Dispose() } }
 }
-function Read-ApiPath([guid]$Id) {
+function Read-ApiPath([guid]$Id, [uint32]$Flags=0) {
     $ptr = [IntPtr]::Zero
     try {
-        $result = [KnownFolderEvaluation]::SHGetKnownFolderPath([ref]$Id,0,[IntPtr]::Zero,[ref]$ptr)
+        $result = [KnownFolderEvaluation]::SHGetKnownFolderPath([ref]$Id,$Flags,[IntPtr]::Zero,[ref]$ptr)
         if ($result -ne 0) { throw "SHGetKnownFolderPath failed: $result" }
         [Runtime.InteropServices.Marshal]::PtrToStringUni($ptr)
     } finally { if ($ptr -ne [IntPtr]::Zero) { [Runtime.InteropServices.Marshal]::FreeCoTaskMem($ptr) } }
@@ -37,6 +37,7 @@ $before = @($keys | ForEach-Object { Snapshot-Key $_ })
 $beforeJson = $before | ConvertTo-Json -Depth 8 -Compress
 $id = [guid]'FDD39AD0-238F-46AF-ADB4-6C85480369C7'
 $originalPath = Read-ApiPath $id
+$windowsDefault = Read-ApiPath $id 0x4600
 $aliasName = '{F42EE2D3-909F-4907-8871-4C22FC0BF756}'
 $target = Join-Path $env:TEMP ('ICloudApi-' + [guid]::NewGuid().ToString('N'))
 $null = [IO.Directory]::CreateDirectory($originalPath)
@@ -54,6 +55,7 @@ try {
     $result = [KnownFolderEvaluation]::SHSetKnownFolderPath([ref]$id,0,[IntPtr]::Zero,$target)
     if ($result -ne 0) { throw "SHSetKnownFolderPath failed: $result" }
     if ((Read-ApiPath $id) -ine $target) { throw 'API destination did not resolve.' }
+    if ((Read-ApiPath $id 0x4600) -ine $windowsDefault) { throw 'Windows default-path query followed current redirection.' }
     if (-not (Test-Path -LiteralPath $sourceFile) -or (Test-Path -LiteralPath (Join-Path $target ([IO.Path]::GetFileName($sourceFile))))) { throw 'Unexpected file migration.' }
     $after = @($keys | ForEach-Object { Snapshot-Key $_ })
     for ($i=0;$i -lt $before.Count;$i++) {
@@ -79,7 +81,7 @@ try {
     }
     $restored = @($keys | ForEach-Object { Snapshot-Key $_ }) | ConvertTo-Json -Depth 8 -Compress
     $exactRestore = $restored -ceq $beforeJson
-    [pscustomobject]@{ Success=($null -eq $failure -and $restoreErrors.Count -eq 0 -and $exactRestore); ApiCanonicalPathVerified=($null -eq $failure); LocalAliasFollowsApi=$aliasFollowsApi; SourceFileRetained=(Test-Path -LiteralPath $sourceFile); ChangedRegistryValues=$changedNames; ExactRestore=$exactRestore; Errors=@(@($failure)+$restoreErrors | Where-Object {$_}); OS=[Environment]::OSVersion.VersionString; PowerShell=$PSVersionTable.PSVersion.ToString() } |
+    [pscustomobject]@{ Success=($null -eq $failure -and $restoreErrors.Count -eq 0 -and $exactRestore); ApiCanonicalPathVerified=($null -eq $failure); DefaultPathIndependentOfRedirection=($null -eq $failure); LocalAliasFollowsApi=$aliasFollowsApi; SourceFileRetained=(Test-Path -LiteralPath $sourceFile); ChangedRegistryValues=$changedNames; ExactRestore=$exactRestore; Errors=@(@($failure)+$restoreErrors | Where-Object {$_}); OS=[Environment]::OSVersion.VersionString; PowerShell=$PSVersionTable.PSVersion.ToString() } |
         ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $output 'known-folder-api.json') -Encoding UTF8
 }
 if ($failure -or $restoreErrors.Count -or -not $exactRestore) { throw 'Known Folder API evaluation failed; inspect known-folder-api.json.' }

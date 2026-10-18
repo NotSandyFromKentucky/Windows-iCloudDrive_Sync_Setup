@@ -4,7 +4,7 @@ $ErrorActionPreference = 'Stop'
 $script:ShellKey = 'Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders'
 
 function Get-FolderMap {
-    param([switch]$IncludeMusic)
+    param([switch]$IncludeMusic, [switch]$SystemDefaults)
     # Registry aliases are deliberately explicit. No OneDrive-specific IDs.
     $map = [ordered]@{
         'Desktop' = 'Desktop'
@@ -23,11 +23,52 @@ function Get-FolderMap {
         $map['My Music'] = 'Music'
         $map['{A0C69A99-21C8-4671-8703-7934162FCF1D}'] = 'Music' # Local Music
     }
+    if ($SystemDefaults) {
+        # Canonical Windows IDs, not the local aliases being synchronized above.
+        $ids = @{
+            Desktop='B4BFCC3A-DB2C-424C-B029-7FE99A87C641'
+            Documents='FDD39AD0-238F-46AF-ADB4-6C85480369C7'
+            Pictures='33E28130-4E1E-4676-835A-98395C3BC3BB'
+            Videos='18989B1D-99B5-455B-841C-AB7C74E4DDFC'
+            Downloads='374DE290-123F-4565-9164-39C4925E467B'
+            'Videos\Captures'='EDC0FE71-98D8-4F4A-B920-C8DC133CB165'
+            Music='4BD8D571-6D19-48D3-BE97-422220080E43'
+        }
+        $paths = @{}
+        foreach ($folder in @($map.Values | Select-Object -Unique)) {
+            $paths[$folder] = Get-NormalPath (Get-WindowsDefaultFolderPath -Id $ids[$folder])
+        }
+        foreach ($name in @($map.Keys)) { $map[$name] = $paths[$map[$name]] }
+    }
     return $map
 }
 
 function Get-UserSid { [Security.Principal.WindowsIdentity]::GetCurrent().User.Value }
-function Get-DefaultProfileRoot { Get-NormalPath $env:USERPROFILE }
+function Get-WindowsDefaultFolderPath {
+    param([guid]$Id)
+    if (-not ('ICloudFolderSettler.NativeKnownFolders' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+namespace ICloudFolderSettler {
+    public static class NativeKnownFolders {
+        [DllImport("shell32.dll", ExactSpelling=true)]
+        public static extern int SHGetKnownFolderPath(ref Guid id, uint flags, IntPtr token, out IntPtr path);
+    }
+}
+'@
+    }
+    $pointer = [IntPtr]::Zero
+    try {
+        # DEFAULT_PATH | NOT_PARENT_RELATIVE | DONT_VERIFY. Never CREATE:
+        # ask Windows for defaults even if parents are redirected or paths absent.
+        $result = [ICloudFolderSettler.NativeKnownFolders]::SHGetKnownFolderPath([ref]$Id,0x4600,[IntPtr]::Zero,[ref]$pointer)
+        if ($result -ne 0) { throw "Windows default-path query failed for $Id (HRESULT $result). No guessed fallback is used." }
+        [Runtime.InteropServices.Marshal]::PtrToStringUni($pointer)
+    } finally {
+        if ($pointer -ne [IntPtr]::Zero) { [Runtime.InteropServices.Marshal]::FreeCoTaskMem($pointer) }
+    }
+}
 function Get-RecoveryRoot { Get-NormalPath (Join-Path $env:LOCALAPPDATA 'ICloudFolderSettler\Recovery') }
 
 function Get-FolderLabel {
@@ -238,18 +279,17 @@ function Invoke-ICloudFolders {
             }
         } else {
             if ($ResetToDefaults) {
-                $root = Get-DefaultProfileRoot
-                if (-not (Test-Path -LiteralPath $root -PathType Container)) { throw "User profile must already exist: $root" }
+                $map = Get-FolderMap -IncludeMusic -SystemDefaults
             } else {
                 $root = Get-NormalPath $ICloudRoot
                 if (-not (Test-Path -LiteralPath $root -PathType Container)) { throw "iCloud root must already exist: $root" }
                 $registeredRoots = @(Get-RegisteredICloudRoots)
+                $map = Get-FolderMap -IncludeMusic:$IncludeMusic
             }
-            $map = Get-FolderMap -IncludeMusic:($IncludeMusic -or $ResetToDefaults)
             foreach ($name in $map.Keys) {
                 $old = Read-FolderValue $name
                 $before += $old
-                $target = Join-Path $root $map[$name]
+                $target = if ($ResetToDefaults) { $map[$name] } else { Join-Path $root $map[$name] }
                 $destinations += $target
                 $desired += [pscustomobject]@{ Name=$name; Exists=$true; Kind='ExpandString'; Data=$target }
                 if ($old.Exists) {

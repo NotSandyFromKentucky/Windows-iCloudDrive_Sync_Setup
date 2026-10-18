@@ -155,9 +155,15 @@ Invoke-ICloudFolders -ICloudRoot (Join-Path $PSScriptRoot 'crash-root') -Include
     Check ((Snapshot) -ceq $before) 'manual recovery after process termination restores exact original settings'
 
     # Reset only in this disposable guest; the host must never run this test.
+    $script:restored = $false
+    Run-Cli 'defaults-seed-redirection' @('-ICloudRoot',$root,'-IncludeMusic','-Apply','-AllowExistingContent','-VerifiedSyncRoot')
+    $redirectedBeforeReset = Snapshot
+    $brokenHistoricalBackup = Join-Path $recovery 'broken-historical\before.json'
+    $null = [IO.Directory]::CreateDirectory((Split-Path $brokenHistoricalBackup))
+    [IO.File]::WriteAllText($brokenHistoricalBackup,'invalid historical JSON')
     Run-Cli 'defaults-preview' @('-ResetToDefaults')
     Run-Cli 'defaults-whatif' @('-ResetToDefaults','-Apply','-AllowExistingContent','-WhatIf')
-    Check ((Snapshot) -ceq $before) 'reset preview and WhatIf leave real registry unchanged'
+    Check ((Snapshot) -ceq $redirectedBeforeReset) 'reset preview and WhatIf leave real redirected registry unchanged'
     $priorBackups = @(Get-ChildItem -LiteralPath $recovery -Recurse -Filter before.json | Select-Object -ExpandProperty FullName)
     try {
         Run-Cli 'defaults-apply' @('-ResetToDefaults','-Apply','-AllowExistingContent')
@@ -171,11 +177,15 @@ Invoke-ICloudFolders -ICloudRoot (Join-Path $PSScriptRoot 'crash-root') -Include
         }
         Check ($defaultValues -eq 13) 'real reset sets all seven local folders and aliases including Music'
         Check ([IO.File]::ReadAllText($sentinel) -ceq 'source must remain unchanged') 'real reset retains source content'
+        Check ([IO.File]::ReadAllText($brokenHistoricalBackup) -ceq 'invalid historical JSON') 'real reset succeeds without reading or changing a corrupt historical backup'
     } finally {
         $resetBackups = @(Get-ChildItem -LiteralPath $recovery -Recurse -Filter before.json | Where-Object { $priorBackups -notcontains $_.FullName })
         if ($resetBackups.Count -eq 1) { Run-Cli 'defaults-restore' @('-RestoreBackup',$resetBackups[0].FullName,'-Apply') }
     }
-    Check ((Snapshot) -ceq $before) 'reset recovery backup restores exact original real registry snapshot'
+    Check ((Snapshot) -ceq $redirectedBeforeReset) 'reset recovery backup restores exact redirected real registry snapshot'
+    Run-Cli 'defaults-original-restore' @('-RestoreBackup',$script:backupPath,'-Apply')
+    Check ((Snapshot) -ceq $before) 'original guest settings restored after default reset evaluation'
+    $script:restored = $true
 
     # Exercise sync-helper safeguards with a local guest fixture, never count it as cloud proof.
     $helper = Join-Path $source 'tools\Test-ICloudRoundTrip.ps1'

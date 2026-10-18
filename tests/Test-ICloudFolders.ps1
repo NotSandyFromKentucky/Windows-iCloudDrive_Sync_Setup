@@ -203,7 +203,23 @@ try {
     & $module {
         param($Profile, $Source)
         $script:DefaultProfile = $Profile
-        function script:Get-DefaultProfileRoot { $script:DefaultProfile }
+        $script:DefaultQueryFailure = $false
+        function script:Get-WindowsDefaultFolderPath {
+            param([guid]$Id)
+            if ($script:DefaultQueryFailure) { throw 'Injected Windows default-path query failure' }
+            $folders = @{
+                'b4bfcc3a-db2c-424c-b029-7fe99a87c641'='Desktop'
+                'fdd39ad0-238f-46af-adb4-6c85480369c7'='Documents'
+                '33e28130-4e1e-4676-835a-98395c3bc3bb'='Pictures'
+                '18989b1d-99b5-455b-841c-ab7c74e4ddfc'='Videos'
+                '374de290-123f-4565-9164-39c4925e467b'='Downloads'
+                'edc0fe71-98d8-4f4a-b920-c8dc133cb165'='Videos-Captures'
+                '4bd8d571-6d19-48d3-be97-422220080e43'='Music'
+            }
+            if (-not $folders.ContainsKey($Id.ToString())) { throw "Unexpected Windows folder ID: $Id" }
+            # Deliberately unlike guessed USERPROFILE paths, and initially absent.
+            Join-Path $script:DefaultProfile ('Windows default ' + $folders[$Id.ToString()])
+        }
         function script:Get-RegisteredICloudRoots { throw 'Reset must not consult iCloud registration' }
         $script:Fake = @{
             Desktop = [pscustomobject]@{Name='Desktop';Exists=$true;Kind='String';Data=$Source}
@@ -220,6 +236,17 @@ try {
     Assert (@(Get-ChildItem -LiteralPath $profile -Force).Count -eq 0) 'Reset preview/WhatIf created destinations'
     Assert (-not (Test-Path (Join-Path $testRoot 'reset-recovery'))) 'Reset preview/WhatIf created backup'
     Pass 'reset preview and WhatIf are read only and independent of iCloud'
+
+    & $module { $script:DefaultQueryFailure = $true }
+    Expect-Failure { Invoke-ICloudFolders -ResetToDefaults -Apply -AllowExistingContent } 'default-path query failure'
+    Assert ((& $module { $script:WriteCount }) -eq 0) 'Default API failure wrote registry'
+    Assert (-not (Test-Path (Join-Path $testRoot 'reset-recovery'))) 'Default API failure created backup'
+    & $module { $script:DefaultQueryFailure = $false }
+    Pass 'Windows default-path query failure aborts without guessed destinations or writes'
+
+    $corruptBackup = Join-Path $testRoot 'reset-recovery\old-broken\before.json'
+    $null = [IO.Directory]::CreateDirectory((Split-Path $corruptBackup))
+    [IO.File]::WriteAllText($corruptBackup, 'broken old backup')
 
     Expect-Failure { Invoke-ICloudFolders -ResetToDefaults -Apply } 'requires review'
     Expect-Failure { Invoke-ICloudFolders -ResetToDefaults -ICloudRoot $cloud } 'cannot be combined'
@@ -240,14 +267,17 @@ try {
     & $module {
         $map = Get-FolderMap -IncludeMusic
         foreach ($name in $map.Keys) {
-            if ($script:Fake[$name].Data -cne (Join-Path $script:DefaultProfile $map[$name]) -or $script:Fake[$name].Kind -cne 'ExpandString') { throw "Incorrect default for $name" }
+            $expected = Join-Path $script:DefaultProfile ('Windows default ' + $map[$name].Replace('\','-'))
+            if ($script:Fake[$name].Data -cne $expected -or $script:Fake[$name].Kind -cne 'ExpandString') { throw "Incorrect default for $name" }
         }
         if ($script:Fake.Count -ne 14 -or $script:Fake.Unrelated.Data -cne 'untouched') { throw 'Reset scope changed' }
     }
     Assert ([IO.File]::ReadAllText((Join-Path $source 'keep.txt')) -ceq 'keep') 'Reset moved/deleted source content'
     Pass 'reset covers all seven folders and aliases including Music while retaining content and unrelated values'
+    Assert ([IO.File]::ReadAllText($corruptBackup) -ceq 'broken old backup') 'Reset read or altered old corrupt backup'
+    Pass 'reset succeeds using Windows-supplied defaults despite a corrupt historical backup'
 
-    $resetBackup = @(Get-ChildItem (Join-Path $testRoot 'reset-recovery') -Recurse -Filter before.json)[0].FullName
+    $resetBackup = @(Get-ChildItem (Join-Path $testRoot 'reset-recovery') -Recurse -Filter before.json | Where-Object {$_.FullName -ne $corruptBackup})[0].FullName
     Invoke-ICloudFolders -RestoreBackup $resetBackup -Apply
     Assert (& $module { $script:Fake.Count -eq 2 -and $script:Fake.Desktop.Kind -ceq 'String' -and $script:Fake.Desktop.Data -ceq $args[0] } $source) 'Reset backup failed to restore exact original state'
     Pass 'reset backup reverses the reset including originally absent Music aliases'
