@@ -1,10 +1,12 @@
 # Changelog
 
-## Unreleased
+## v2.2.0
 
 - Adds preview-first `-ResetToDefaults` for every managed folder including Music, with exact backup, checked writes and rollback. Existing files stay in place.
 - Adds `Reset-WindowsFolderDefaults.cmd` for Explorer, requiring an exact `RESET` acknowledgement after previewing destinations and the existing-content notice.
 - Reset queries Windows for actual default locations, independently of current and parent redirection. It needs no historical backup, including when old backups are corrupt, and still requires a fresh recovery backup before applying.
+
+Validation: 26 core, ten launcher and five diagnostic scenarios passed across the six Windows OS/shell combinations. Each of the three disposable Windows images passed 53 real integration checks, including corrupt historical backups and exact recovery after reset. Packages remain explicitly unsigned; checksums and per-file hashes are included.
 
 ## v2.1.0
 

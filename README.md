@@ -8,6 +8,8 @@ Get the versioned ZIP from [GitHub Releases](https://github.com/NotSandyFromKent
 
 See [CHANGELOG.md](CHANGELOG.md) for changes from the legacy batch release.
 
+Version 2.2.0 also includes `Reset-WindowsFolderDefaults.cmd` for a preview-first reset to Windows-supplied default locations without requiring a historical backup or an available iCloud installation.
+
 ## Requirements
 
 - Windows with Windows PowerShell 5.1 and iCloud for Windows already configured.
