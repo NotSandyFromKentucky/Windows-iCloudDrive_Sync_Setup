@@ -1,4 +1,4 @@
-﻿#requires -Version 5.1
+#requires -Version 5.1
 $ErrorActionPreference='Stop'
 $repo=Split-Path $PSScriptRoot -Parent
 if([Threading.Thread]::CurrentThread.ApartmentState -ne 'STA'){
@@ -47,6 +47,15 @@ try{
         Assert ($worker.Process.ExitCode -eq 0 -and $result.Root -ceq $tricky -and $result.Music -and -not $result.Apply) 'Worker changed paths or flags'
     }finally{if(-not $worker.Process.HasExited){$worker.Process.Kill()};$worker.Process.Dispose()}
     'PASS: asynchronous child preserves Unicode, apostrophes and shell metacharacters as data'
+    @('Write-Host "Recovery backup: fixture-before.json"','Write-Warning "Review the fixture warning"','exit 0') | Set-Content (Join-Path $fixture 'Set-ICloudFolders.ps1') -Encoding UTF8
+    $worker=Start-SetupWorker -Source $fixture -Request $r
+    try{
+        Assert ($worker.Process.WaitForExit(10000)) 'Host-output worker hung'
+        $text=$worker.Output.Result
+        Assert ($text -like '*Recovery backup: fixture-before.json*' -and $text -like '*Review the fixture warning*') 'Worker hid recovery paths or warnings'
+    }finally{$worker.Process.Dispose()}
+    'PASS: readable worker output retains recovery paths and warnings'
+    @('param([string]$ICloudRoot,[switch]$IncludeMusic,[switch]$Apply,[switch]$WhatIf)','[pscustomobject]@{Root=$ICloudRoot;Music=[bool]$IncludeMusic;Apply=[bool]$Apply;WhatIf=[bool]$WhatIf} | ConvertTo-Json -Compress','exit 0') | Set-Content (Join-Path $fixture 'Set-ICloudFolders.ps1') -Encoding UTF8
     $window=New-SetupWindow -Source $fixture -ConfirmAction {$false}
     try{
         $window.Form.Show()
@@ -55,14 +64,14 @@ try{
         $window.Root.Text='C:\GUI fixture'
         $window.Preview.PerformClick()
         $deadline=[DateTime]::UtcNow.AddSeconds(12)
-        while($window.Output.Text -notlike '*Exit code: 0*' -and [DateTime]::UtcNow -lt $deadline){[Windows.Forms.Application]::DoEvents();Start-Sleep -Milliseconds 50}
-        Assert ($window.Output.Text -like '*Exit code: 0*' -and $window.Apply.Enabled) ('Preview failed: '+$window.Output.Text)
+        while(-not $window.Preview.Enabled -and [DateTime]::UtcNow -lt $deadline){[Windows.Forms.Application]::DoEvents();Start-Sleep -Milliseconds 50}
+        Assert ($window.Status.Text -like 'Preview ready*' -and $window.Apply.Enabled) ('Preview failed: '+$window.Output.Text)
         $beforeCancel=$window.Output.Text
         $window.Apply.PerformClick()
         Assert ($window.Output.Text -ceq $beforeCancel -and $window.Apply.Enabled) 'Cancelling confirmation started a worker or changed the result'
         $window.DryRun.PerformClick()
         $deadline=[DateTime]::UtcNow.AddSeconds(12)
-        while($window.Output.Text -notlike '*Exit code: 0*' -and [DateTime]::UtcNow -lt $deadline){[Windows.Forms.Application]::DoEvents();Start-Sleep -Milliseconds 50}
+        while(-not $window.Preview.Enabled -and [DateTime]::UtcNow -lt $deadline){[Windows.Forms.Application]::DoEvents();Start-Sleep -Milliseconds 50}
         Assert ($window.Apply.Enabled) 'Successful dry run did not enable reviewed apply'
         $window.Music.Checked=$true
         Assert (-not $window.Apply.Enabled) 'Changed options did not invalidate preview'
@@ -84,16 +93,18 @@ try{
         $window.Form.Show();[Windows.Forms.Application]::DoEvents()
         $window.Preview.PerformClick()
         $deadline=[DateTime]::UtcNow.AddSeconds(12)
-        while($window.Output.Text -notlike '*Exit code: 0*' -and [DateTime]::UtcNow -lt $deadline){[Windows.Forms.Application]::DoEvents();Start-Sleep -Milliseconds 50}
+        while(-not $window.Preview.Enabled -and [DateTime]::UtcNow -lt $deadline){[Windows.Forms.Application]::DoEvents();Start-Sleep -Milliseconds 50}
         $window.Apply.PerformClick()
         $deadline=[DateTime]::UtcNow.AddSeconds(12)
-        while($window.Output.Text -notlike '*Exit code: 0*' -and [DateTime]::UtcNow -lt $deadline){[Windows.Forms.Application]::DoEvents();Start-Sleep -Milliseconds 50}
-        Assert ($window.Output.Text -like '*"Apply":true*' -and -not $window.Apply.Enabled) ('Confirmed apply did not execute only the reviewed fixture: '+$window.Output.Text)
+        while(-not $window.Preview.Enabled -and [DateTime]::UtcNow -lt $deadline){[Windows.Forms.Application]::DoEvents();Start-Sleep -Milliseconds 50}
+        Assert ($window.Status.Text -like 'Action completed*' -and -not $window.Apply.Enabled) ('Confirmed apply did not execute only the reviewed fixture: '+$window.Output.Text)
         'exit 1' | Set-Content (Join-Path $fixture 'Set-ICloudFolders.ps1')
         $window.Preview.PerformClick()
         $deadline=[DateTime]::UtcNow.AddSeconds(12)
-        while($window.Output.Text -notlike '*Exit code: 1*' -and [DateTime]::UtcNow -lt $deadline){[Windows.Forms.Application]::DoEvents();Start-Sleep -Milliseconds 50}
-        Assert ($window.Output.Text -like '*Exit code: 1*' -and -not $window.Apply.Enabled) 'Failed preview enabled Apply or hid the error'
+        while(-not $window.Preview.Enabled -and [DateTime]::UtcNow -lt $deadline){[Windows.Forms.Application]::DoEvents();Start-Sleep -Milliseconds 50}
+        $window.Details.Checked=$true
+
+        Assert ($window.Status.Text -like 'The action did not complete*' -and -not $window.Apply.Enabled) ('Failed preview enabled Apply or hid the error: '+$window.Status.Text)
     }finally{$window.Form.Close();$window.Form.Dispose()}
     'PASS: confirmed apply reaches only the reviewed fixture and failed preview blocks mutation'
     $installOptions=@{Source=$repo;InstallRoot=(Join-Path $fixture 'installed');ProgramsDirectory=(Join-Path $fixture 'start-menu');DesktopDirectory=(Join-Path $fixture 'desktop')}

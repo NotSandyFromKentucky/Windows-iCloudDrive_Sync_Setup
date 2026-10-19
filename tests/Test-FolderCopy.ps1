@@ -1,4 +1,4 @@
-﻿#requires -Version 5.1
+#requires -Version 5.1
 $ErrorActionPreference='Stop'
 $repo=Split-Path $PSScriptRoot -Parent
 $fixture=Join-Path $repo ('.test-copy-'+[guid]::NewGuid().ToString('N'))
@@ -12,6 +12,12 @@ try{
     [IO.File]::WriteAllText((Join-Path $source 'a.txt'),'original')
     [IO.File]::WriteAllText((Join-Path $source ('special ! '+[char]0x00E9+'.txt')),'unicode path')
     & $module {param($Source,$Target) $script:Pairs=@([pscustomobject]@{Source=$Source;Destination=$Target});function script:Get-CopyPairs { $script:Pairs }} $source $target
+    $channel='Local\ICloudCopy-'+[guid]::NewGuid().ToString('N')
+    $cancel=New-Object Threading.EventWaitHandle($true,[Threading.EventResetMode]::ManualReset,$channel)
+    try{Fail {Invoke-ICloudFolderCopy -Apply -CancelEventName $channel} 'safe boundary'}finally{$cancel.Dispose()}
+    Assert (-not(Test-Path -LiteralPath $target)) 'Pre-signalled stop created destination'
+    Fail {Invoke-ICloudFolderCopy -CancelEventName 'invalid'} 'Invalid cancellation channel'
+    'PASS: cancellation during planning and invalid channels cannot write destination files'
     Invoke-ICloudFolderCopy
     Invoke-ICloudFolderCopy -Apply -WhatIf
     Assert (-not(Test-Path -LiteralPath $target)) 'Preview or WhatIf created destination'

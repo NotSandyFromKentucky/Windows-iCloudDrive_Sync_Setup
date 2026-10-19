@@ -1,5 +1,6 @@
 ﻿#requires -Version 5.1
 Set-StrictMode -Version Latest
+$script:CopyCancelHandle=$null;$script:CopyProgressEnabled=$false
 function Assert-CopyPath {
     param([string]$Path)
     # Cloud Files reparse points are data placeholders; name-surrogate links are not.
@@ -72,6 +73,17 @@ function Get-CopyPairs {
         }
     } $ICloudRoot ([bool]$ResetToDefaults) ([bool]$IncludeMusic) ([bool]$VerifiedSyncRoot) ([bool]$ForApply)
 }
+function Test-CopyCancellation {
+    if($script:CopyCancelHandle -and $script:CopyCancelHandle.WaitOne(0)){
+        throw (New-Object OperationCanceledException('Copy stopped at a safe boundary. Originals and completed files are retained; folder settings are unchanged.'))
+    }
+}
+function Send-CopyProgress {
+    param([string]$Stage,[string]$File,[int]$Completed=0,[int]$Total=0)
+    if($script:CopyProgressEnabled){
+        [Console]::Out.WriteLine(('@@ICloudProgress:'+([pscustomobject]@{Stage=$Stage;File=$File;Completed=$Completed;Total=$Total} | ConvertTo-Json -Compress)))
+    }
+}
 function Get-CopyPlan {
     param([object[]]$Pairs)
     $plan=New-Object Collections.Generic.List[object]
@@ -90,7 +102,9 @@ function Get-CopyPlan {
         $queue.Enqueue([pscustomobject]@{Source=$source;Destination=$target})
     }
     while($queue.Count){
+        Test-CopyCancellation
         $item=$queue.Dequeue();$source=$item.Source;$target=$item.Destination
+        Send-CopyProgress -Stage 'Reading files' -File $source
         Assert-CopyPath $source;Assert-CopyPath $target
         $sourceItem=Get-Item -LiteralPath $source -Force
         if($sourceItem.Attributes -band [IO.FileAttributes]::Encrypted){throw "Encrypted files require a separate reviewed copy: $source"}
@@ -120,10 +134,15 @@ function Get-CopyPlan {
 }
 function Invoke-ICloudFolderCopy {
     [CmdletBinding(SupportsShouldProcess)]
-    param([string]$ICloudRoot="$env:USERPROFILE\iCloudDrive",[switch]$ResetToDefaults,[switch]$IncludeMusic,[switch]$VerifiedSyncRoot,[switch]$Apply)
+    param([string]$ICloudRoot="$env:USERPROFILE\iCloudDrive",[switch]$ResetToDefaults,[switch]$IncludeMusic,[switch]$VerifiedSyncRoot,[switch]$Apply,[string]$CancelEventName,[switch]$ProgressEvents)
     $mutex=New-Object Threading.Mutex($false,('Local\ICloudFolders-'+[Security.Principal.WindowsIdentity]::GetCurrent().User.Value))
     $locked=$false
+    $script:CopyCancelHandle=$null;$script:CopyProgressEnabled=[bool]$ProgressEvents
     try{
+        if($CancelEventName){
+            if($CancelEventName -notmatch '^Local\\ICloudCopy-[a-f0-9]{32}$'){throw 'Invalid cancellation channel.'}
+            $script:CopyCancelHandle=[Threading.EventWaitHandle]::OpenExisting($CancelEventName)
+        }
         try{$locked=$mutex.WaitOne(0)}catch [Threading.AbandonedMutexException]{$locked=$true}
         if(-not $locked){throw 'Another folder operation is running for this account.'}
         $pairs=@(Get-CopyPairs -ICloudRoot $ICloudRoot -ResetToDefaults:$ResetToDefaults -IncludeMusic:$IncludeMusic -VerifiedSyncRoot:$VerifiedSyncRoot -ForApply:$Apply)
@@ -135,9 +154,11 @@ function Invoke-ICloudFolderCopy {
         # Rebuild before the first write to reject changed source/destination content.
         $fresh=@(Get-CopyPlan $pairs)
         if(($fresh | ConvertTo-Json -Depth 5 -Compress) -cne ($plan | ConvertTo-Json -Depth 5 -Compress)){throw 'Files changed after planning. Preview again.'}
-        $copied=0
+        $copied=0;$completed=0;$total=@($plan | Where-Object {-not $_.Directory}).Count
         try{
             foreach($entry in $plan){
+                Test-CopyCancellation
+                if(-not $entry.Directory){Send-CopyProgress -Stage 'Copying and verifying' -File $entry.Source -Completed $completed -Total $total}
                 Assert-CopyPath $entry.Source;Assert-CopyPath $entry.Destination
                 if($entry.Directory){
                     if(Test-Path -LiteralPath $entry.Destination){if(-not(Test-Path -LiteralPath $entry.Destination -PathType Container)){throw 'Destination changed to a file.'}}
@@ -147,15 +168,17 @@ function Invoke-ICloudFolderCopy {
                 if((Get-CopyHash $entry.Source) -cne $entry.Hash){throw "Source changed: $($entry.Source)"}
                 if(Test-Path -LiteralPath $entry.Destination){
                     if((Get-CopyHash $entry.Destination) -cne $entry.Hash){throw "Destination changed: $($entry.Destination)"}
+                    $completed++;Send-CopyProgress -Stage 'Verified' -File $entry.Source -Completed $completed -Total $total
                     continue
                 }
                 # File.Copy(false) atomically refuses an existing destination; never overwrite.
                 [IO.File]::Copy($entry.Source,$entry.Destination,$false)
                 if((Get-CopyHash $entry.Destination) -cne $entry.Hash -or (Get-CopyHash $entry.Source) -cne $entry.Hash){throw "Copy verification failed: $($entry.Destination)"}
-                $copied++
+                $copied++;$completed++
+                Send-CopyProgress -Stage 'Verified' -File $entry.Source -Completed $completed -Total $total
             }
-        }catch{throw "Copy stopped: $($_.Exception.Message) Originals and folder settings are unchanged. Completed or incomplete destination copies are retained for inspection; no files were deleted."}
+        }catch [OperationCanceledException]{throw}catch{throw "Copy stopped: $($_.Exception.Message) Originals and folder settings are unchanged. Completed or incomplete destination copies are retained for inspection; no files were deleted."}
         Write-Host "Copy verified. New files copied: $copied. Originals retained. Folder settings unchanged. Preview the folder setup/reset separately before applying it."
-    }finally{if($locked){$mutex.ReleaseMutex()};$mutex.Dispose()}
+    }finally{if($script:CopyCancelHandle){$script:CopyCancelHandle.Dispose();$script:CopyCancelHandle=$null};if($locked){$mutex.ReleaseMutex()};$mutex.Dispose()}
 }
 Export-ModuleMember -Function Invoke-ICloudFolderCopy

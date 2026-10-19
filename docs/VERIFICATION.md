@@ -98,3 +98,7 @@ A version-tag push runs the full validation workflow before publishing. The rele
 - Repeat the documented remote round trip on each new installation or when diagnosing sync problems. The observed pass above applies to the tested account, version and time.
 - Actual trusted signing requires a suitable certificate. Optional signing and rejection of an unavailable certificate are implemented; releases are explicitly unsigned until such a certificate is supplied.
 - Application-specific custom save locations and other iCloud versions are not universally certified by a standard Windows dialog test. Retain this scope statement instead of claiming perfection or compatibility with every application/version.
+
+## UX regression fixtures (2026-10-19, unreleased)
+
+Local fixture tests verify actionable outcome text, action-specific confirmation with Cancel selected, keyboard focus and safe Enter behavior, native UI Automation name/role and MSAA properties. Layout/font fixtures render at 100, 125, 150 and 200 percent. A real child copy worker reports live progress and stops after its first verified file; originals and completed copies remain. No developer-account folder settings are changed. Actual Narrator speech and physical multi-monitor DPI transitions remain manual checks; scaled renderings are not evidence of those behaviors.

@@ -42,7 +42,7 @@ Recovery storage must not overlap source/destination trees. Manual restore accep
 
 ## Graphical flow and installation
 
-Get-SetupRequest maps controls to existing scripts without duplicating registry logic. Encoded data passes user paths as data to a hidden child process. Output is read asynchronously; closing is blocked while running. Apply requires a matching successful preview/dry run and default-No confirmation. Option changes invalidate preview. The backend remains responsible for ShouldProcess and safety checks.
+Get-SetupRequest maps controls to existing scripts without duplicating registry logic. Encoded data passes user paths as data to a hidden child process. Output is read asynchronously; closing is blocked while running. Apply requires a matching successful preview/dry run and an action-specific confirmation with Cancel as the default. Option changes invalidate preview. The backend remains responsible for ShouldProcess and safety checks.
 
 The optional installer copies only manifest/central-release-listed files into a unique per-user version directory. It verifies copies before shortcut creation, preserves old binaries and backs up same-name shortcuts. It never redirects folders or installs iCloud. Portable execution and the legacy console wrapper remain supported.
 
@@ -59,3 +59,9 @@ Sources are always retained. Partial destination copies remain on failure for in
 Local tests use fake registry access or unique file/GUI/install fixtures. Real integration is restricted to guarded disposable guests. Never use live developer-account redirection as a test. One real cloud round trip was observed on 2026-10-18; that does not certify all providers, versions or applications.
 
 VERSION and build/ReleaseFiles.json define distribution inputs. Packages are built from exact committed source, optionally signed in staging, manifested and checksummed. Version-tag publication is gated by CI and remote-byte verification. Published tags/assets are immutable. Detailed commands and evidence belong in the linked development and verification guides.
+
+## GUI progress and accessibility
+
+Copy workers send prefixed JSON progress lines over standard output and accept a uniquely named local cancellation event. Cancellation is cooperative at file boundaries; copying and SHA-256 verification of the current file finish first. Exit code 3 means safely stopped. Registry writes are never interrupted through this mechanism. Technical output is optional; normal results explain next steps. Controls expose accessible names and descriptions, a logical tab sequence and keyboard mnemonics. Enter previews; confirmation defaults to Cancel. Auto-sized rows and wrapping accommodate enlarged text.
+
+Test-UserExperience.ps1 exercises real UI Automation and MSAA properties, keyboard focus, modal cancellation, 100/125/150/200 percent layout/font fixtures, and a real child copy worker stopped after its first verified file. These fixtures do not certify Narrator speech or physical multi-monitor DPI transitions.

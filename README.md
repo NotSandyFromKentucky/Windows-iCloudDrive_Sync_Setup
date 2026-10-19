@@ -21,7 +21,7 @@ Registration confirms the configured Drive path, not synchronization health. See
 
 ## Use the graphical window
 
-Choose an action and its options, then click **Preview / Check** or **Dry run**. Review the displayed paths and warnings. **Apply** becomes available only after a successful preview/dry run of the same options and asks for confirmation with No selected by default. Changing options invalidates the reviewed preview. The window remains responsive while operations run and cannot close until they finish.
+Choose an action and its options, then click **Preview / Check** or **Dry run**. Review the displayed paths and warnings. An action-specific button becomes available only after a successful preview/dry run of the same options. Its confirmation names the action, with Cancel selected by default. Changing options invalidates the reviewed preview. The window remains responsive while operations run and cannot close until they finish. Results use plain language; select **Technical details** for raw output and exit codes.
 
 | Action | What it does |
 | --- | --- |
@@ -32,7 +32,7 @@ Choose an action and its options, then click **Preview / Check** or **Dry run**.
 | Check iCloud configuration | Check registration, paths and folder resolution. JSON output and saving the displayed result are optional. |
 | Create / check / clean up cloud test | Create a harmless file, check a remotely renamed return, or preview and confirm its removal. Instructions appear in the window. |
 
-**Recovery files**, **Help**, and **Install for me** are available in the same window. The setup/reset acknowledgement **Continue without copying existing files** permits changing locations while leaving content where it is; it never triggers copying.
+**Recovery files**, **Help**, and **Install for me** are available in the same window. The setup/reset acknowledgement **Change locations without copying files** permits changing locations while leaving content where it is; it never triggers copying.
 
 For direct Explorer access, **Reset-WindowsFolderDefaults.cmd** opens reset mode and **Check-ICloudFolderSetup.cmd** opens diagnostics. All settings and safety checks are shared with the [command-line interface](docs/CLI.md).
 
@@ -58,7 +58,7 @@ Missing files are copied and verified with SHA-256; identical files are skipped 
 
 Unavailable sources, overlapping trees, encrypted files, junctions, symbolic links and unsupported reparse points are refused. Reading Windows Cloud Files placeholders may download content, and destination copies may synchronize. Live iCloud hydration/copy is not certified by fixture tests.
 
-Apply rebuilds the plan before writing and rechecks hashes. Active file changes can stop copying. Originals and folder settings remain unchanged on failure; partial destination copies are retained for inspection. This is a content merge, not a metadata-complete archival backup.
+Apply rebuilds the plan before writing and rechecks hashes. Active file changes can stop copying. Originals and folder settings remain unchanged on failure; partial destination copies are retained for inspection. Copy progress reports the current file and verified file count. **Stop after current file** finishes copying and verifying the current file, then stops before the next. Planning can stop between files. A large file or cloud download can delay stopping. Completed copies remain; preview again before resuming. Folder-setting operations cannot be cancelled mid-write. This is a content merge, not a metadata-complete archival backup.
 
 ## Backups and recovery
 

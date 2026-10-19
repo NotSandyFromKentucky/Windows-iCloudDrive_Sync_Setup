@@ -26,6 +26,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-ExplorerLau
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Diagnostics.ps1
 powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File .\tests\Test-SetupUI.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-FolderCopy.ps1
+powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File .\tests\Test-UserExperience.ps1
 ~~~
 
 Core tests replace registry access with an in-memory boundary. GUI tests use a stub child script and render the real window. Installer/copy tests use unique fixture directories and fixture shortcuts, retaining personal files and live settings. The GUI suite checks Unicode paths, confirmation, preview invalidation, copy routes, package-style installation and tampered-source rejection.
@@ -55,3 +56,5 @@ Published tags/assets, including legacy releases, are immutable. The failed v2.3
 ## Local cleanup
 
 Ignored .local artifacts include recovery-related evidence and cloud-test state as well as rebuildable downloads. Do not use broad git clean or recursive deletion without identifying the contents and checking absolute target paths. Repository cleanup must not delete source files, recovery records, IDE state or cloud-synchronized test content. The Git-tracked tree and release allowlist define distributed content; ignoring a directory does not prevent iCloud from synchronizing it.
+
+The UX suite briefly opens fixture windows and saves scaled screenshots under ignored .local/ux. It verifies UI Automation/MSAA metadata and keyboard focus, not spoken screen-reader output. Manually check Narrator announcements and moving the window between monitors with different DPI before claiming full accessibility coverage.

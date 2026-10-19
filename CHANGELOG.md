@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Adds plain-language results and actionable errors, optional technical details, and action-specific confirmations defaulting to Cancel.
+- Shows live copy progress and supports stopping after the current file is copied and verified, retaining originals and completed copies.
+- Improves keyboard access, accessible control metadata and enlarged-text layouts; adds UI Automation, scaling and safe-cancellation regression fixtures.
+
+
 ## v2.3.1
 
 - Adds separate graphical copy/merge actions for iCloud and Windows default folders. Copies retain originals, skip identical files, refuse conflicting contents, and verify SHA-256 without changing folder settings.
