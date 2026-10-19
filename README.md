@@ -4,7 +4,7 @@ Preview and redirect selected Windows user folders into an existing iCloud Drive
 
 ## Download
 
-Get the versioned ZIP from [GitHub Releases](https://github.com/NotSandyFromKentucky/Windows-iCloudDrive_Sync_Setup/releases/latest), extract the entire ZIP, and double-click `Open-ICloudFolderSetup.cmd` inside the extracted folder. Keep the scripts together; the launcher needs its accompanying PowerShell module and script. Each release includes `SHA256SUMS.txt` for checking the download. Starting with v2.1.0, packages also contain a per-file manifest and signature state.
+Download and extract the entire ZIP. For a per-user installation, double-click **Install-ICloudFolderSetup.cmd**, then click **Install for me**. It copies verified application files into local application data and creates a Start menu shortcut; a desktop shortcut is optional. No administrator access is needed, and installation does not change folder settings. You can then delete the extracted download. For portable use, double-click **Open-ICloudFolderSetup.cmd** instead. Keep the scripts together. Published downloads are at [GitHub Releases](https://github.com/NotSandyFromKentucky/Windows-iCloudDrive_Sync_Setup/releases/latest) and include checksums and a per-file manifest. The graphical interface and installer are included starting with v2.3.0.
 
 See [CHANGELOG.md](CHANGELOG.md) for changes from the legacy batch release.
 
@@ -20,9 +20,18 @@ Windows PowerShell 5.1 is the tested runtime. Windows/iCloud integration still r
 
 ## Run from Explorer
 
-Double-click **`Open-ICloudFolderSetup.cmd`**. It displays the default preview and asks you to type `APPLY` before changing settings. Press Enter to cancel. The window stays open afterward so you can read the result and backup path. Run it normally as your own account; administrator access is unnecessary.
+Double-click **Open-ICloudFolderSetup.cmd**, or use the installed Start menu shortcut. The graphical window exposes every supported operation without typing terminal commands:
 
-This launcher uses an execution-policy override for its PowerShell process only. It uses the default root and leaves Music off. Existing-content and root-validation checks still apply; use the CLI options below if you need a custom root or have reviewed content that must remain in its old location.
+- Set up iCloud folders with a folder picker, optional Music, manual root-verification acknowledgement and existing-content acknowledgement.
+- Reset all managed folders to Windows defaults, or choose a trusted recovery backup to restore.
+- Preview, dry run and explicitly confirm Apply. Changing options invalidates the reviewed preview; failed previews cannot enable Apply.
+- Check iCloud configuration, choose JSON output and save the displayed result.
+- Create, check and clean up the harmless cloud round-trip test. Renaming the file still needs iCloud.com or another device; instructions appear in the window. Cleanup previews exact files and requires confirmation because deletion synchronizes.
+- Open recovery files and help, or install for the current user.
+
+Opening the window and previewing are read-only. Apply requires a successful preview or dry run for the same options and a confirmation dialog whose default is No. Existing backend root, source-content, backup, checked-write and rollback protections still apply. Operations run in a hidden child process while the window remains responsive; closing is blocked until it finishes. Run as your own account.
+
+The legacy PowerShell interactive script and unattended CLI remain available for automation. The Explorer launchers use a process-only execution-policy override and an STA Windows Forms window; no machine policy is changed.
 
 ## Check an existing setup
 
@@ -101,7 +110,7 @@ Legacy named entries and local-folder aliases point to the same destination. `Im
 
 ### Reset to Windows defaults
 
-Double-click **`Reset-WindowsFolderDefaults.cmd`** to preview local defaults for all seven managed folders, including Music. Type exactly `RESET` to acknowledge that existing files stay where they are and apply the displayed paths. Press Enter to cancel. Run as your own account.
+Double-click **Reset-WindowsFolderDefaults.cmd** to open the graphical window in reset mode. Review existing files, select the acknowledgement checkbox, preview the defaults for all seven managed folders including Music, then click Apply and confirm. Cancel leaves the configuration unchanged.
 
 For the CLI, preview first:
 
@@ -114,7 +123,7 @@ Reset asks Windows for each folder's default using `SHGetKnownFolderPath` with `
 
 No historical backup is required or read. Missing or corrupt old backups do not prevent resetting to Windows defaults. A fresh, verified backup of the current settings is still required before applying, so a failed reset can roll back. This implements Windows default-location semantics, not every undocumented side effect of Explorer's Restore Default button or its optional file-moving prompts. The checked registry backend remains in place to preserve local aliases and exact rollback.
 
-Reset changes folder pointers only. Files in iCloud stay there; they will not automatically appear in the new local folders. Review and copy content separately if needed. CLI apply requires `-AllowExistingContent` when a changing source contains files; the Explorer `RESET` acknowledgement accepts leaving that content in place. Preview and `-WhatIf` remain read-only. Missing local destinations are created only after apply is approved. The same exact backup and rollback protections apply, and `-RestoreBackup` can undo a reset. Sign out/in after applying and verify Explorer and applications. Existing policies or another sync provider may reapply their own locations.
+Reset changes folder pointers only. Files in iCloud stay there; they will not automatically appear in the new local folders. Review and copy content separately if needed. CLI apply requires `-AllowExistingContent` when a changing source contains files; the graphical existing-content acknowledgement accepts leaving that content in place. Preview and `-WhatIf` remain read-only. Missing local destinations are created only after apply is approved. The same exact backup and rollback protections apply, and `-RestoreBackup` can undo a reset. Sign out/in after applying and verify Explorer and applications. Existing policies or another sync provider may reapply their own locations.
 
 Reset passed fake-registry tests and real reset/restore checks on all three disposable Windows CI images in [run 39135664146](https://github.com/NotSandyFromKentucky/Windows-iCloudDrive_Sync_Setup/actions/runs/39135664146). Your account was used only for read-only preview/WhatIf, with the complete registry snapshot unchanged. The previous cloud round-trip result applies to the iCloud setup, not to local defaults. `Check-ICloudFolderSetup.cmd` checks iCloud destinations and will therefore report mismatches after an intentional reset to local defaults.
 
@@ -160,3 +169,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Diagnostics
 Tests use an in-memory registry boundary and temporary folders inside this repository. They never write user-shell registry values. See [project context](docs/CONTEXT.md) for architecture, decisions, validation coverage, and integration checks still needed.
 
 An isolated Windows Sandbox run additionally passed 29 real-registry integration checks on 2026-10-18, including apply, exact restore, and rollback after a partial write. `tests/Invoke-SandboxIntegration.ps1` is the guest-only test payload; it must be launched through a staged Sandbox configuration, never directly on the host. This used a synthetic local root and did not test iCloud synchronization or sign-out/sign-in behavior.
+
+## Installation details
+
+Installation is per-user under %LOCALAPPDATA%\Programs\ICloudFolderSettler. Every install gets a unique version directory; old installations and recovery records are retained. The installer verifies copied hashes before creating shortcuts and backs up existing same-name shortcuts before replacing them. It installs only release-listed files, not workspace state, personal logs or recovery backups. A partial copy failure leaves its isolated directory for inspection and never applies folder changes. No Windows service, scheduled task, iCloud installation or registry redirection is part of installation. Shortcut creation is current-user only.
+
+The new GUI and installer have fixture-based option-routing, window-rendering, async worker, preview invalidation, copy verification, shortcut and reinstall coverage. Real host folder apply/reset is never used as a GUI test. Standard dialogs and rendering on other display scales still require platform-specific verification; automated tests do not establish universal accessibility or application compatibility.

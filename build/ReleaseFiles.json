@@ -12,5 +12,10 @@
   "VERSION",
   "docs/CONTEXT.md",
   "docs/VERIFICATION.md",
-  "tools/Test-ICloudRoundTrip.ps1"
+  "tools/Test-ICloudRoundTrip.ps1",
+  "ICloudFolderSetup.UI.psm1",
+  "Start-ICloudFolderSetup.ps1",
+  "ICloudFolderSetup.Install.psm1",
+  "Install-ICloudFolderSetup.ps1",
+  "Install-ICloudFolderSetup.cmd"
 ]

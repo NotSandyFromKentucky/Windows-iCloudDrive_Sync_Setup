@@ -1,5 +1,10 @@
 # Changelog
 
+## v2.3.0
+
+- Adds a graphical Explorer interface for every supported setup, reset, restore, diagnostic and cloud-test option, with pickers, preview/dry run and explicit confirmation.
+- Adds optional per-user installation with verified copies and Start menu/desktop shortcuts. Folder configuration remains unchanged until separately reviewed and applied.
+
 ## v2.2.0
 
 - Adds preview-first `-ResetToDefaults` for every managed folder including Music, with exact backup, checked writes and rollback. Existing files stay in place.

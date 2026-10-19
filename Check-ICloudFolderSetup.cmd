@@ -1,7 +1,3 @@
 @echo off
 setlocal DisableDelayedExpansion
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0Test-ICloudFolders.ps1"
-set "checkExit=%errorlevel%"
-echo.
-pause
-exit /b %checkExit%
+start "" powershell.exe -NoProfile -STA -WindowStyle Hidden -ExecutionPolicy Bypass -File "%~dp0Start-ICloudFolderSetup.ps1" -InitialMode Check
