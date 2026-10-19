@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 Set-StrictMode -Version Latest
 function Get-SetupRequest {
     param([string]$Action,[string]$Root,[string]$Backup,[bool]$Music,[bool]$Verified,[bool]$KeepFiles,[bool]$Json,[ValidateSet('Preview','DryRun','Apply')][string]$Phase='Preview')
@@ -12,6 +12,16 @@ function Get-SetupRequest {
             if($Verified){$options.VerifiedSyncRoot=$true}
             if($KeepFiles){$options.AllowExistingContent=$true}
             $mutates=$true
+        }
+        'Copy files into iCloud folders' {
+            if([string]::IsNullOrWhiteSpace($Root)){throw 'Choose your existing iCloud Drive folder.'}
+            $scriptFile='Copy-ICloudFolderFiles.ps1';$options.ICloudRoot=$Root
+            if($Music){$options.IncludeMusic=$true}
+            if($Verified){$options.VerifiedSyncRoot=$true}
+            $mutates=$true
+        }
+        'Copy files into Windows default folders' {
+            $scriptFile='Copy-ICloudFolderFiles.ps1';$options.ResetToDefaults=$true;$mutates=$true
         }
         'Reset to Windows defaults' {
             $scriptFile='Set-ICloudFolders.ps1';$options.ResetToDefaults=$true
@@ -33,7 +43,7 @@ function Get-SetupRequest {
         default {throw 'Choose a supported action.'}
     }
     if($mutates){
-        if($scriptFile -eq 'Set-ICloudFolders.ps1'){
+        if($scriptFile -in @('Set-ICloudFolders.ps1','Copy-ICloudFolderFiles.ps1')){
             if($Phase -ne 'Preview'){$options.Apply=$true}
             if($Phase -eq 'DryRun'){$options.WhatIf=$true}
         } elseif($Phase -ne 'Apply'){$options.WhatIf=$true}
@@ -78,7 +88,7 @@ function New-SetupWindow {
     $notice=New-Object Windows.Forms.Label
     $notice.Text='Preview before applying. Existing files stay where they are. Run as your own Windows account; no administrator access is needed.'
     $notice.Dock='Fill';$layout.Controls.Add($notice,0,0)
-    $actions=@('Set up iCloud folders','Reset to Windows defaults','Restore a recovery backup','Check iCloud configuration','Create cloud test file','Check cloud return','Clean up cloud test file')
+    $actions=@('Set up iCloud folders','Reset to Windows defaults','Restore a recovery backup','Copy files into iCloud folders','Copy files into Windows default folders','Check iCloud configuration','Create cloud test file','Check cloud return','Clean up cloud test file')
     $action=New-Object Windows.Forms.ComboBox
     $action.DropDownStyle='DropDownList';$action.Dock='Fill';$action.AccessibleName='Action'
     $action.Items.AddRange([object[]]$actions);$action.SelectedItem=$InitialAction
@@ -101,8 +111,8 @@ function New-SetupWindow {
     $backupRow.Controls.Add($backupLabel,0,0);$backupRow.Controls.Add($backup,1,0);$backupRow.Controls.Add($browseBackup,2,0);$layout.Controls.Add($backupRow,0,3)
     $flags=New-Object Windows.Forms.FlowLayoutPanel;$flags.Dock='Fill';$flags.FlowDirection='TopDown';$flags.WrapContents=$false
     $music=New-Object Windows.Forms.CheckBox;$music.Text='Include Music (reset always includes Music)';$music.AutoSize=$true
-    $verified=New-Object Windows.Forms.CheckBox;$verified.Text='I verified this active root in iCloud settings (only needed if Windows has no registration)';$verified.AutoSize=$true
-    $keep=New-Object Windows.Forms.CheckBox;$keep.Text='I reviewed existing source files and accept leaving them in their current locations';$keep.AutoSize=$true
+    $verified=New-Object Windows.Forms.CheckBox;$verified.Text='Use a manually verified iCloud folder (only if automatic detection is unavailable)';$verified.AutoSize=$true
+    $keep=New-Object Windows.Forms.CheckBox;$keep.Text='Continue without copying existing files (originals stay in their current folders)';$keep.AutoSize=$true
     $flags.Controls.AddRange(@($music,$verified,$keep));$layout.Controls.Add($flags,0,4)
     $buttons=New-Object Windows.Forms.FlowLayoutPanel;$buttons.Dock='Fill'
     $preview=New-Object Windows.Forms.Button;$preview.Text='Preview / Check';$preview.AutoSize=$true
@@ -126,15 +136,16 @@ function New-SetupWindow {
     $invalidate={$state.Fingerprint=$null;$apply.Enabled=$false}.GetNewClosure()
     $refresh={
         & $invalidate
-        $setup=$action.Text -eq 'Set up iCloud folders'
+        $setup=$action.Text -in @('Set up iCloud folders','Copy files into iCloud folders')
         $rootRow.Enabled=$setup -or $action.Text -eq 'Check iCloud configuration'
         $backupRow.Enabled=$action.Text -eq 'Restore a recovery backup'
         $music.Enabled=$rootRow.Enabled;$verified.Enabled=$setup
-        $keep.Enabled=$setup -or $action.Text -eq 'Reset to Windows defaults'
+        $keep.Enabled=$action.Text -in @('Set up iCloud folders','Reset to Windows defaults')
         $json.Enabled=$action.Text -eq 'Check iCloud configuration'
         $dry.Enabled=$action.Text -notin @('Check iCloud configuration','Check cloud return')
         $output.Text=switch($action.Text){
-            'Reset to Windows defaults' {'Reset uses Windows defaults for all seven managed folders. Old backups are not needed. Files in iCloud stay there; review the plan before applying.'}
+            'Copy files into iCloud folders' {'Merge files into the selected iCloud folders. Missing files are copied and verified; identical files are skipped. Different same-name files block the operation. Originals and folder settings stay unchanged.'}
+            'Copy files into Windows default folders' {'Merge files into Windows default folders, keeping every original. Nothing is overwritten. Copy first, then select Reset to Windows defaults to change folder locations separately.'}
             'Restore a recovery backup' {'Choose a trusted before.json file. Preview validates the account and contents. Files are never moved.'}
             'Create cloud test file' {'Creates one harmless text file in redirected Documents after approval. On iCloud.com or another device, rename -upload.txt to -returned.txt; never rename locally.'}
             'Check cloud return' {'Checks the returned filename and original SHA-256. A match proves a round trip only if the rename was performed remotely.'}
@@ -161,6 +172,7 @@ function New-SetupWindow {
             if($phase -eq 'Apply'){
                 if($state.Fingerprint -cne $fingerprint){throw 'Options changed. Preview this plan again before applying.'}
                 $message=$request.Action+". Existing files stay in place. A fresh recovery backup is required for folder changes."
+                if($request.Script -eq 'Copy-ICloudFolderFiles.ps1'){$message='Copy files according to this plan? Existing files will not be overwritten, originals stay in place, and folder locations will not change. Cloud files may download and destination copies may synchronize.'}
                 if($request.Action -eq 'Create cloud test file'){$message='Create the small verification file in your iCloud Documents folder?'}
                 if($request.Action -eq 'Clean up cloud test file'){$message='Delete the exact verification file(s)? This deletion will synchronize to iCloud and other devices.'}
                 if(-not (& $ConfirmAction $form $message)){return}

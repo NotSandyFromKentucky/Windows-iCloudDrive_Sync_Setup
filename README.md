@@ -1,6 +1,6 @@
 # iCloud home folder settler
 
-Preview and redirect selected Windows user folders into an existing iCloud Drive root. The tool changes paths for the current account; it does not install iCloud, enable synchronization, or move files.
+Preview and redirect selected Windows user folders into an existing iCloud Drive root. The tool changes paths for the current account. It also offers a separate, explicitly approved copy operation that retains originals. It does not install iCloud, enable synchronization, or automatically migrate files.
 
 ## Download
 
@@ -24,6 +24,7 @@ Double-click **Open-ICloudFolderSetup.cmd**, or use the installed Start menu sho
 
 - Set up iCloud folders with a folder picker, optional Music, manual root-verification acknowledgement and existing-content acknowledgement.
 - Reset all managed folders to Windows defaults, or choose a trusted recovery backup to restore.
+- Copy existing files into iCloud folders or Windows default folders as a separate, previewed operation. Originals stay in place.
 - Preview, dry run and explicitly confirm Apply. Changing options invalidates the reviewed preview; failed previews cannot enable Apply.
 - Check iCloud configuration, choose JSON output and save the displayed result.
 - Create, check and clean up the harmless cloud round-trip test. Renaming the file still needs iCloud.com or another device; instructions appear in the window. Cleanup previews exact files and requires confirmation because deletion synchronizes.
@@ -175,3 +176,16 @@ An isolated Windows Sandbox run additionally passed 29 real-registry integration
 Installation is per-user under %LOCALAPPDATA%\Programs\ICloudFolderSettler. Every install gets a unique version directory; old installations and recovery records are retained. The installer verifies copied hashes before creating shortcuts and backs up existing same-name shortcuts before replacing them. It installs only release-listed files, not workspace state, personal logs or recovery backups. A partial copy failure leaves its isolated directory for inspection and never applies folder changes. No Windows service, scheduled task, iCloud installation or registry redirection is part of installation. Shortcut creation is current-user only.
 
 The new GUI and installer have fixture-based option-routing, window-rendering, async worker, preview invalidation, copy verification, shortcut and reinstall coverage. Real host folder apply/reset is never used as a GUI test. Standard dialogs and rendering on other display scales still require platform-specific verification; automated tests do not establish universal accessibility or application compatibility.
+
+
+## Copy and merge existing files
+
+Select **Copy files into iCloud folders** or **Copy files into Windows default folders** in the graphical window. Select the iCloud destination and optional Music when applicable. Click **Preview / Check** to inspect the exact source/destination plan, or **Dry run** to validate without writing. Click **Apply** and confirm only after reviewing the plan.
+
+Copying and changing folder locations are separate actions. Copy first, verify the result, then select setup or reset and preview those location changes. The "Continue without copying existing files" checkbox permits changing locations while retaining originals; it does not trigger a copy.
+
+Missing files are copied, empty directories are retained, and identical files are skipped using SHA-256. A different same-name destination file, a file/folder mismatch, or inconsistent source aliases stops planning before any destination writes. No destination file is overwritten and no source file is moved or deleted. Repeating a completed copy skips identical files.
+
+Unavailable sources, overlapping source/destination trees, encrypted files, junctions, symbolic links and unsupported reparse points are refused. Windows Cloud Files placeholders are allowed; hashing or copying them can download cloud contents, and destination copies may synchronize. Actual iCloud hydration/copy integration has not been certified by the fixture tests.
+
+The plan is rebuilt immediately before writing, source hashes are rechecked, existing destinations are rechecked, and new copies are hash-verified. Files actively changing during copying may cause an error. On failure, originals and folder settings remain unchanged; partial destination files/directories are retained for inspection rather than deleted. This is a content merge, not an archival backup: ACLs, alternate streams, application consistency and every filesystem metadata field are not independently certified by the hash check.

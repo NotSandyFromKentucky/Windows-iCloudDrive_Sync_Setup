@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 $ErrorActionPreference='Stop'
 $repo=Split-Path $PSScriptRoot -Parent
 if([Threading.Thread]::CurrentThread.ApartmentState -ne 'STA'){
@@ -32,6 +32,10 @@ try{
         Assert (-not $r.Options.ContainsKey('WhatIf')) 'Explicit cloud action remained preview'
     }
     Assert (-not (Get-SetupRequest -Action 'Check cloud return').Mutates) 'Return check marked as mutation'
+    $r=Get-SetupRequest -Action 'Copy files into iCloud folders' -Root 'C:\cloud' -Music $true -Verified $true -Phase DryRun
+    Assert ($r.Script -eq 'Copy-ICloudFolderFiles.ps1' -and $r.Options.Apply -and $r.Options.WhatIf -and $r.Options.IncludeMusic -and $r.Options.VerifiedSyncRoot) 'Copy options/dry run lost'
+    $r=Get-SetupRequest -Action 'Copy files into Windows default folders'
+    Assert ($r.Options.ResetToDefaults -and -not $r.Options.ContainsKey('Apply') -and -not $r.Options.ContainsKey('ICloudRoot')) 'Default-folder copy is not a read-only independent plan'
     'PASS: all supported actions and options preserve backend read-only previews'
     @('param([string]$ICloudRoot,[switch]$IncludeMusic,[switch]$Apply,[switch]$WhatIf)','[pscustomobject]@{Root=$ICloudRoot;Music=[bool]$IncludeMusic;Apply=[bool]$Apply;WhatIf=[bool]$WhatIf} | ConvertTo-Json -Compress','exit 0') | Set-Content (Join-Path $fixture 'Set-ICloudFolders.ps1') -Encoding UTF8
     $tricky="C:\space ! ' & "+[char]0x00E9
@@ -132,5 +136,3 @@ try{
     $path=[IO.Path]::GetFullPath($fixture)
     if($path.StartsWith([IO.Path]::GetFullPath($repo).TrimEnd('\')+'\.test-gui-',[StringComparison]::OrdinalIgnoreCase)){Remove-Item -LiteralPath $path -Recurse -Force}
 }
-
-

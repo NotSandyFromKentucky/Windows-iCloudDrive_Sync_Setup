@@ -38,6 +38,7 @@ jobs:
           & ./tests/Test-ExplorerLauncher.ps1
           & ./tests/Test-Diagnostics.ps1
           & ./tests/Test-SetupUI.ps1
+          & ./tests/Test-FolderCopy.ps1
   integration:
     name: Isolated real writes (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
