@@ -70,6 +70,7 @@ try{
         Assert ($window.Json.Enabled -and -not $window.DryRun.Enabled -and -not $window.Apply.Enabled) 'Read-only check exposes mutation'
         $window.Action.SelectedItem='Set up iCloud folders'
         $window.Root.Text='C:\Users\Example\iCloudDrive'
+        $null=[IO.Directory]::CreateDirectory((Join-Path $repo '.local'))
         $bitmap=New-Object Drawing.Bitmap($window.Form.Width,$window.Form.Height)
         try{$window.Form.DrawToBitmap($bitmap,(New-Object Drawing.Rectangle(0,0,$bitmap.Width,$bitmap.Height)));$bitmap.Save((Join-Path $repo '.local\gui-preview.png'))}finally{$bitmap.Dispose()}
     }finally{$window.Form.Close();$window.Form.Dispose()}

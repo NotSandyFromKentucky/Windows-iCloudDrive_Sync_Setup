@@ -4,7 +4,7 @@ Preview and redirect selected Windows user folders into an existing iCloud Drive
 
 ## Download
 
-Download and extract the entire ZIP. For a per-user installation, double-click **Install-ICloudFolderSetup.cmd**, then click **Install for me**. It copies verified application files into local application data and creates a Start menu shortcut; a desktop shortcut is optional. No administrator access is needed, and installation does not change folder settings. You can then delete the extracted download. For portable use, double-click **Open-ICloudFolderSetup.cmd** instead. Keep the scripts together. Published downloads are at [GitHub Releases](https://github.com/NotSandyFromKentucky/Windows-iCloudDrive_Sync_Setup/releases/latest) and include checksums and a per-file manifest. The graphical interface and installer are included starting with v2.3.0.
+Download and extract the entire ZIP. For a per-user installation, double-click **Install-ICloudFolderSetup.cmd**, then click **Install for me**. It copies verified application files into local application data and creates a Start menu shortcut; a desktop shortcut is optional. No administrator access is needed, and installation does not change folder settings. You can then delete the extracted download. For portable use, double-click **Open-ICloudFolderSetup.cmd** instead. Keep the scripts together. Published downloads are at [GitHub Releases](https://github.com/NotSandyFromKentucky/Windows-iCloudDrive_Sync_Setup/releases/latest) and include checksums and a per-file manifest. The graphical interface and installer are included starting with v2.3.1.
 
 See [CHANGELOG.md](CHANGELOG.md) for changes from the legacy batch release.
 

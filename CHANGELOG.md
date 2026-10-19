@@ -1,6 +1,8 @@
 # Changelog
 
-## v2.3.0
+## v2.3.1
+
+- Creates the GUI rendering test's output directory explicitly so validation works on clean Windows runners. The failed v2.3.0 tag was not published.
 
 - Adds a graphical Explorer interface for every supported setup, reset, restore, diagnostic and cloud-test option, with pickers, preview/dry run and explicit confirmation.
 - Adds optional per-user installation with verified copies and Start menu/desktop shortcuts. Folder configuration remains unchanged until separately reviewed and applied.
