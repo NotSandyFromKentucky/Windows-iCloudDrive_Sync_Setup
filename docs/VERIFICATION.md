@@ -6,15 +6,13 @@
 
 Double-click `Check-ICloudFolderSetup.cmd` for the same check from Explorer. Preview output uses folder names and distinguishes missing values, changes and already configured values.
 
+## Graphical installer and copy/merge
+
+[v2.3.1 release validation](https://github.com/NotSandyFromKentucky/Windows-iCloudDrive_Sync_Setup/actions/runs/39229331158), source commit f3fa56bc89d0ff65473bb0d23fc90b0ab275cd81, passed the six OS/shell local-suite jobs, three guarded integration jobs, package verification and publication. The local suites included GUI rendering/confirmation, fixture installer/reinstall/manifest checks, explicit copy routing, conflict refusal and retained sources after partial-copy failure. The public ZIP was independently verified and its installer tested using fixture application/shortcut directories. No developer-account folder redirection, personal-file merge or real Start menu modification was part of those tests. Real iCloud hydration/copy and every display scale remain outside this evidence.
+
 ## Repeatable tests
 
-Run these locally with Windows PowerShell 5.1:
-
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-ICloudFolders.ps1
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-ExplorerLauncher.ps1
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Diagnostics.ps1
-```
+The complete [local suite commands and development workflow](DEVELOPMENT.md#local-verification) are maintained in one place. Run them with Windows PowerShell 5.1; the GUI suite starts an STA process when needed.
 
 The core tests use an in-memory registry boundary and isolated temporary directories. They cover original value types and absence, scope, preflight errors, read-back corruption, partial failure, unavailable/malformed recovery records and rollback failure reporting. The launcher tests cover explicit apply, cancellation and error handling. Diagnostics tests cover mismatches, unavailable root registration, resolution errors and no filesystem changes.
 

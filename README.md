@@ -1,191 +1,92 @@
 # iCloud home folder settler
 
-Preview and redirect selected Windows user folders into an existing iCloud Drive root. The tool changes paths for the current account. It also offers a separate, explicitly approved copy operation that retains originals. It does not install iCloud, enable synchronization, or automatically migrate files.
+Configure selected Windows user folders to use iCloud Drive, reset them to Windows defaults, or restore a recovery backup. The graphical interface also offers an explicit copy/merge operation that keeps originals. Nothing changes until you review and confirm an action.
 
-## Download
+## Download and install
 
-Download and extract the entire ZIP. For a per-user installation, double-click **Install-ICloudFolderSetup.cmd**, then click **Install for me**. It copies verified application files into local application data and creates a Start menu shortcut; a desktop shortcut is optional. No administrator access is needed, and installation does not change folder settings. You can then delete the extracted download. For portable use, double-click **Open-ICloudFolderSetup.cmd** instead. Keep the scripts together. Published downloads are at [GitHub Releases](https://github.com/NotSandyFromKentucky/Windows-iCloudDrive_Sync_Setup/releases/latest) and include checksums and a per-file manifest. The graphical interface and installer are included starting with v2.3.1.
+Download the ZIP from [GitHub Releases](https://github.com/NotSandyFromKentucky/Windows-iCloudDrive_Sync_Setup/releases/latest) and extract the entire archive.
 
-See [CHANGELOG.md](CHANGELOG.md) for changes from the legacy batch release.
+- **Install for your account:** double-click **Install-ICloudFolderSetup.cmd**, then **Install for me**. A Start menu shortcut is created; a desktop shortcut is optional. After a successful installation, the extracted download can be removed.
+- **Run without installing:** double-click **Open-ICloudFolderSetup.cmd** and keep the extracted files together.
 
-Version 2.2.0 also includes `Reset-WindowsFolderDefaults.cmd` for a preview-first reset to Windows-supplied default locations without requiring a historical backup or an available iCloud installation.
+Run normally as your own Windows account. Administrator access is unnecessary. Installation copies application files only; it does not configure folders or install iCloud. Release archives include SHA-256 checksums and a per-file manifest. Packages are unsigned; hashes do not authenticate the publisher. See the [changelog](CHANGELOG.md).
 
 ## Requirements
 
-- Windows with Windows PowerShell 5.1 and iCloud for Windows already configured.
-- Run as the account whose folders you want to change. Administrator access is unnecessary; do not run as a different administrator account.
-- Confirm iCloud is signed in and the intended root is available. A registered provider path proves configuration, not working synchronization.
+- Windows and Windows PowerShell 5.1. The graphical launchers use Windows Forms and a process-only execution-policy override; machine policy is unchanged.
+- iCloud for Windows signed in with an existing Drive folder for iCloud setup and cloud verification.
+- Reset and backup restore do not require an available iCloud installation. Copying cloud-only files requires the provider to make their contents available.
 
-Windows PowerShell 5.1 is the tested runtime. Windows/iCloud integration still requires testing in an isolated account or VM before deployment to other machines. There are no third-party dependencies or Java requirements.
+Registration confirms the configured Drive path, not synchronization health. See [tested platforms and support limits](docs/VERIFICATION.md).
 
-## Run from Explorer
+## Use the graphical window
 
-Double-click **Open-ICloudFolderSetup.cmd**, or use the installed Start menu shortcut. The graphical window exposes every supported operation without typing terminal commands:
+Choose an action and its options, then click **Preview / Check** or **Dry run**. Review the displayed paths and warnings. **Apply** becomes available only after a successful preview/dry run of the same options and asks for confirmation with No selected by default. Changing options invalidates the reviewed preview. The window remains responsive while operations run and cannot close until they finish.
 
-- Set up iCloud folders with a folder picker, optional Music, manual root-verification acknowledgement and existing-content acknowledgement.
-- Reset all managed folders to Windows defaults, or choose a trusted recovery backup to restore.
-- Copy existing files into iCloud folders or Windows default folders as a separate, previewed operation. Originals stay in place.
-- Preview, dry run and explicitly confirm Apply. Changing options invalidates the reviewed preview; failed previews cannot enable Apply.
-- Check iCloud configuration, choose JSON output and save the displayed result.
-- Create, check and clean up the harmless cloud round-trip test. Renaming the file still needs iCloud.com or another device; instructions appear in the window. Cleanup previews exact files and requires confirmation because deletion synchronizes.
-- Open recovery files and help, or install for the current user.
+| Action | What it does |
+| --- | --- |
+| Set up iCloud folders | Choose the existing Drive folder; optionally include Music. A manual verification fallback is available only as an acknowledgement when Windows has no registration; it cannot override a known mismatch. |
+| Reset to Windows defaults | Ask Windows for all seven managed folders' default locations. No historical backup is needed, even if old backups are corrupt. |
+| Restore a recovery backup | Choose a trusted before.json file for this Windows account. Preview validates its scope and destinations. |
+| Copy files into iCloud / Windows default folders | Preview and explicitly approve a merge that retains originals. Folder settings do not change. |
+| Check iCloud configuration | Check registration, paths and folder resolution. JSON output and saving the displayed result are optional. |
+| Create / check / clean up cloud test | Create a harmless file, check a remotely renamed return, or preview and confirm its removal. Instructions appear in the window. |
 
-Opening the window and previewing are read-only. Apply requires a successful preview or dry run for the same options and a confirmation dialog whose default is No. Existing backend root, source-content, backup, checked-write and rollback protections still apply. Operations run in a hidden child process while the window remains responsive; closing is blocked until it finishes. Run as your own account.
+**Recovery files**, **Help**, and **Install for me** are available in the same window. The setup/reset acknowledgement **Continue without copying existing files** permits changing locations while leaving content where it is; it never triggers copying.
 
-The legacy PowerShell interactive script and unattended CLI remain available for automation. The Explorer launchers use a process-only execution-policy override and an STA Windows Forms window; no machine policy is changed.
-
-## Check an existing setup
-
-Double-click `Check-ICloudFolderSetup.cmd` for read-only diagnostics, or run:
-
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Test-ICloudFolders.ps1
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Test-ICloudFolders.ps1 -Json
-```
-
-This checks root registration, mappings, existing destination folders and Windows folder resolution. Exit code 0 means the checks passed, 2 means configuration needs attention, and 1 means an execution error. It does not prove cloud synchronization. See [verification guidance](docs/VERIFICATION.md) for an explicit two-way sync test, platform coverage, API evaluation and signing limits.
-
-An observed cloud round trip passed on 2026-10-18 with iCloud for Windows 15.10.39.0: a Documents test file reached iCloud.com, was renamed there, and returned to Windows with unchanged SHA-256. Repeat this check on your own installation; it does not guarantee future synchronization or compatibility with every application.
-
-## Preview
-
-From this directory:
-
-```powershell
-powershell.exe -NoProfile -File .\Set-ICloudFolders.ps1
-```
-
-The default root is `$env:USERPROFILE\iCloudDrive`. Specify a different existing location when needed:
-
-```powershell
-powershell.exe -NoProfile -File .\Set-ICloudFolders.ps1 -ICloudRoot 'D:\iCloudDrive'
-```
-
-Preview displays every current and proposed registry value and warns about existing source content. It creates no folders, backups, or logs and writes no settings. Missing roots, file obstructions, unsupported registry types, and unreadable paths produce errors rather than a misleading plan.
-
-If local execution policy blocks scripts, a one-process override can run a reviewed local script without changing the machine policy:
-
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Set-ICloudFolders.ps1
-```
-
-`Set-ICloudFolders.cmd` is an optional launcher that forwards arguments, respects execution policy, returns the PowerShell exit code, and never pauses. Use PowerShell directly for paths containing cmd metacharacters such as `%`.
-
-## Apply
-
-Review the preview and decide how existing files will be handled first. Nothing copies, merges, overwrites, or deletes your existing files.
-
-```powershell
-powershell.exe -NoProfile -File .\Set-ICloudFolders.ps1 -Apply
-```
-
-The root is compared with the current account's iCloud Drive registration in Windows SyncRootManager. A mismatch stops application, even if `-VerifiedSyncRoot` is supplied. If no registration is available on your version of iCloud, manually check the root in iCloud settings and use the fallback:
-
-```powershell
-powershell.exe -NoProfile -File .\Set-ICloudFolders.ps1 -Apply -VerifiedSyncRoot
-```
-
-If a source folder contains files and its path will change, application stops. After reviewing or separately copying that content, `-AllowExistingContent` permits changing the pointer while leaving all source files in place. This flag performs no migration. The same rule applies to changing an already redirected location.
-
-```powershell
-powershell.exe -NoProfile -File .\Set-ICloudFolders.ps1 -Apply -AllowExistingContent
-```
-
-Add `-IncludeMusic` to both preview and apply if Music should be redirected. `-Apply -WhatIf` performs the apply preflight but writes nothing. `-Confirm` can request PowerShell's standard confirmation for the complete operation. Exit code `0` means preview/completion/WhatIf; `1` means failure.
+For direct Explorer access, **Reset-WindowsFolderDefaults.cmd** opens reset mode and **Check-ICloudFolderSetup.cmd** opens diagnostics. All settings and safety checks are shared with the [command-line interface](docs/CLI.md).
 
 ## Folder scope
 
-| Folder | Destination beneath root | Default |
+| Folder | Destination beneath the iCloud root | Setup default |
 | --- | --- | --- |
-| Desktop | `Desktop` | Included |
-| Documents | `Documents` | Included |
-| Pictures | `Pictures` | Included |
-| Videos | `Videos` | Included |
-| Downloads | `Downloads` | Included |
-| Captures | `Videos\Captures` | Included |
-| Music | `Music` | Opt in |
+| Desktop | Desktop | Included |
+| Documents | Documents | Included |
+| Pictures | Pictures | Included |
+| Videos | Videos | Included |
+| Downloads | Downloads | Included |
+| Captures | Videos\Captures | Included |
+| Music | Music | Optional |
 
-Legacy named entries and local-folder aliases point to the same destination. `Images` is no longer a separate Pictures destination. OneDrive-specific entries, AppData, Start Menu, Startup, and unrelated settings are untouched. Existing `Images` contents are not merged into `Pictures`; review them separately if you used the old scripts.
-
-## Backups, failures, and restore
-
-### Reset to Windows defaults
-
-Double-click **Reset-WindowsFolderDefaults.cmd** to open the graphical window in reset mode. Review existing files, select the acknowledgement checkbox, preview the defaults for all seven managed folders including Music, then click Apply and confirm. Cancel leaves the configuration unchanged.
-
-For the CLI, preview first:
-
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Set-ICloudFolders.ps1 -ResetToDefaults
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Set-ICloudFolders.ps1 -ResetToDefaults -Apply -AllowExistingContent
-```
-
-Reset asks Windows for each folder's default using `SHGetKnownFolderPath` with `KF_FLAG_DEFAULT_PATH`, `KF_FLAG_NOT_PARENT_RELATIVE` and `KF_FLAG_DONT_VERIFY`. This retrieves defaults independently of current redirection, including redirected parents, without creating missing directories during preview. Typical defaults are beneath `%USERPROFILE%`: Desktop, Documents, Pictures, Videos, Downloads, Music, and `Videos\Captures`; paths are supplied by Windows rather than guessed. If Windows cannot supply a default, reset stops before making changes. Aliases use the same destinations. The operation covers only this project's mappings; OneDrive-specific entries and unrelated profile settings remain untouched. It requires no iCloud root or sign-in and cannot be combined with `-ICloudRoot`, `-VerifiedSyncRoot`, `-IncludeMusic` or `-RestoreBackup`.
-
-No historical backup is required or read. Missing or corrupt old backups do not prevent resetting to Windows defaults. A fresh, verified backup of the current settings is still required before applying, so a failed reset can roll back. This implements Windows default-location semantics, not every undocumented side effect of Explorer's Restore Default button or its optional file-moving prompts. The checked registry backend remains in place to preserve local aliases and exact rollback.
-
-Reset changes folder pointers only. Files in iCloud stay there; they will not automatically appear in the new local folders. Review and copy content separately if needed. CLI apply requires `-AllowExistingContent` when a changing source contains files; the graphical existing-content acknowledgement accepts leaving that content in place. Preview and `-WhatIf` remain read-only. Missing local destinations are created only after apply is approved. The same exact backup and rollback protections apply, and `-RestoreBackup` can undo a reset. Sign out/in after applying and verify Explorer and applications. Existing policies or another sync provider may reapply their own locations.
-
-Reset passed fake-registry tests and real reset/restore checks on all three disposable Windows CI images in [run 39135664146](https://github.com/NotSandyFromKentucky/Windows-iCloudDrive_Sync_Setup/actions/runs/39135664146). Your account was used only for read-only preview/WhatIf, with the complete registry snapshot unchanged. The previous cloud round-trip result applies to the iCloud setup, not to local defaults. `Check-ICloudFolderSetup.cmd` checks iCloud destinations and will therefore report mismatches after an intentional reset to local defaults.
-
-### Recovery records
-
-Before any registry write, the tool saves and verifies:
-
-```text
-%LOCALAPPDATA%\ICloudFolderSettler\Recovery\<timestamp>-<unique-id>\before.json
-%LOCALAPPDATA%\ICloudFolderSettler\Recovery\<timestamp>-<unique-id>\operation.log
-```
-
-The backup records exact unexpanded strings, registry types, and whether each value originally existed. It is bound to the account SID and the specific registry key. It is local to this machine/account, contains personal paths, and should not be committed. Backups are retained until you choose to remove them.
-
-Destination creation and write-access probes complete before registry changes. Writes are checked immediately and at completion. A failure after writes begin triggers best-effort restoration of all affected values, including deletion of newly introduced values. If rollback itself fails, the error explicitly says `ROLLBACK INCOMPLETE` and identifies the backup. Read the log and correct the underlying permissions or availability problem before restoring.
-
-Preview and then restore a trusted backup:
-
-```powershell
-powershell.exe -NoProfile -File .\Set-ICloudFolders.ps1 -RestoreBackup 'C:\path\to\before.json'
-powershell.exe -NoProfile -File .\Set-ICloudFolders.ps1 -RestoreBackup 'C:\path\to\before.json' -Apply
-```
-
-Restore checks the backup schema, SID, value-name allowlist, and original destination availability. It also makes a new backup of current values, so restoration can be reversed. It changes settings only; files remain where they are. Do not edit recovery JSON or load untrusted backups.
-
-Preflight failures are printed to the console. Logs start only after apply is approved and recovery storage is ready. New destination directories can remain after a failed operation; the tool deliberately does not delete them or their contents. A process crash, shutdown, or power failure cannot trigger automatic rollback: use the printed backup manually. The mutex prevents concurrent instances of this tool for the account, but other applications can still change folder settings.
-
-## Verify after applying
-
-1. Sign out and sign back in; save open work first.
-2. Open each affected folder in Explorer and check its location and expected files. Also test applications that save to those folders.
-3. Verify an ordinary test file synchronizes through iCloud to another device or iCloud.com. Registry read-back alone does not verify Explorer refresh or cloud sync.
-4. Retain the backup until you have verified the new setup. Keep old source files until any separate migration has been checked.
-
-## Development
-
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-ICloudFolders.ps1
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-ExplorerLauncher.ps1
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Diagnostics.ps1
-```
-
-Tests use an in-memory registry boundary and temporary folders inside this repository. They never write user-shell registry values. See [project context](docs/CONTEXT.md) for architecture, decisions, validation coverage, and integration checks still needed.
-
-An isolated Windows Sandbox run additionally passed 29 real-registry integration checks on 2026-10-18, including apply, exact restore, and rollback after a partial write. `tests/Invoke-SandboxIntegration.ps1` is the guest-only test payload; it must be launched through a staged Sandbox configuration, never directly on the host. This used a synthetic local root and did not test iCloud synchronization or sign-out/sign-in behavior.
-
-## Installation details
-
-Installation is per-user under %LOCALAPPDATA%\Programs\ICloudFolderSettler. Every install gets a unique version directory; old installations and recovery records are retained. The installer verifies copied hashes before creating shortcuts and backs up existing same-name shortcuts before replacing them. It installs only release-listed files, not workspace state, personal logs or recovery backups. A partial copy failure leaves its isolated directory for inspection and never applies folder changes. No Windows service, scheduled task, iCloud installation or registry redirection is part of installation. Shortcut creation is current-user only.
-
-The new GUI and installer have fixture-based option-routing, window-rendering, async worker, preview invalidation, copy verification, shortcut and reinstall coverage. Real host folder apply/reset is never used as a GUI test. Standard dialogs and rendering on other display scales still require platform-specific verification; automated tests do not establish universal accessibility or application compatibility.
-
+Aliases use the same destination. Reset always includes Music. OneDrive-specific entries and unrelated profile settings are untouched. The old Images destination is not automatically merged into Pictures.
 
 ## Copy and merge existing files
 
-Select **Copy files into iCloud folders** or **Copy files into Windows default folders** in the graphical window. Select the iCloud destination and optional Music when applicable. Click **Preview / Check** to inspect the exact source/destination plan, or **Dry run** to validate without writing. Click **Apply** and confirm only after reviewing the plan.
+Select either copy action, inspect its plan, and explicitly confirm Apply. **Copy first, verify, then change folder locations separately.**
 
-Copying and changing folder locations are separate actions. Copy first, verify the result, then select setup or reset and preview those location changes. The "Continue without copying existing files" checkbox permits changing locations while retaining originals; it does not trigger a copy.
+Missing files are copied and verified with SHA-256; identical files are skipped and empty directories retained. Different same-name files, file/folder mismatches and conflicting aliases stop planning before writes. No source is deleted and no destination file is overwritten.
 
-Missing files are copied, empty directories are retained, and identical files are skipped using SHA-256. A different same-name destination file, a file/folder mismatch, or inconsistent source aliases stops planning before any destination writes. No destination file is overwritten and no source file is moved or deleted. Repeating a completed copy skips identical files.
+Unavailable sources, overlapping trees, encrypted files, junctions, symbolic links and unsupported reparse points are refused. Reading Windows Cloud Files placeholders may download content, and destination copies may synchronize. Live iCloud hydration/copy is not certified by fixture tests.
 
-Unavailable sources, overlapping source/destination trees, encrypted files, junctions, symbolic links and unsupported reparse points are refused. Windows Cloud Files placeholders are allowed; hashing or copying them can download cloud contents, and destination copies may synchronize. Actual iCloud hydration/copy integration has not been certified by the fixture tests.
+Apply rebuilds the plan before writing and rechecks hashes. Active file changes can stop copying. Originals and folder settings remain unchanged on failure; partial destination copies are retained for inspection. This is a content merge, not a metadata-complete archival backup.
 
-The plan is rebuilt immediately before writing, source hashes are rechecked, existing destinations are rechecked, and new copies are hash-verified. Files actively changing during copying may cause an error. On failure, originals and folder settings remain unchanged; partial destination files/directories are retained for inspection rather than deleted. This is a content merge, not an archival backup: ACLs, alternate streams, application consistency and every filesystem metadata field are not independently certified by the hash check.
+## Backups and recovery
+
+Before any folder-setting change, the tool creates and verifies a new account-bound recovery backup under:
+
+~~~text
+%LOCALAPPDATA%\ICloudFolderSettler\Recovery\<timestamp>-<unique-id>\
+~~~
+
+The window displays the backup and operation-log paths. Backups preserve exact unexpanded values, registry types and originally absent entries. Keep them local and retain them until the new configuration is verified. Use **Restore a recovery backup** to undo a setup or reset; restoration makes another backup first.
+
+Writes are checked. A failure triggers best-effort rollback, including removal of originally absent values. **ROLLBACK INCOMPLETE** identifies a recovery problem requiring attention. A crash or power loss cannot automatically roll back: use the printed backup manually. Newly created directories and their contents are never automatically removed.
+
+A reset obtains defaults from Windows without reading old backups. It still requires a fresh recovery backup before applying. Source files stay in place unless you separately approve copying. Existing policies or another sync provider can reapply their own locations. Full [CLI and recovery details](docs/CLI.md) are available for advanced use.
+
+## Verify afterward
+
+Save work, sign out/in, and verify Explorer paths and application save locations. Retain backups and source files until checked. Check an ordinary file through iCloud.com or another device; local diagnostics cannot prove cloud synchronization. The configuration checker expects iCloud destinations and reports mismatches after an intentional reset to local defaults.
+
+A real round trip passed on 2026-10-18 with iCloud for Windows 15.10.39.0. That result applies to one installation and time, not ongoing health or every application. See [verification evidence and the repeatable procedure](docs/VERIFICATION.md).
+
+## Installation details
+
+Application files are copied into unique version directories beneath %LOCALAPPDATA%\Programs\ICloudFolderSettler. Copies are hash-verified before current-user shortcuts are created. Existing binaries, recovery records and same-name shortcuts are retained or backed up. A failed install can leave its isolated directory for inspection; it never applies folder changes.
+
+## Project documentation
+
+- [Command-line reference](docs/CLI.md)
+- [Architecture and repository structure](docs/CONTEXT.md)
+- [Development, tests and releases](docs/DEVELOPMENT.md)
+- [Verification evidence and limitations](docs/VERIFICATION.md)

@@ -58,7 +58,6 @@ function Start-SetupWorker {
     $command='$ErrorActionPreference="Stop";$d=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("'+$encodedData+'")) | ConvertFrom-Json;$o=@{};foreach($p in $d.Options.PSObject.Properties){$o[$p.Name]=$p.Value};try{& $d.Path @o}catch{[Console]::Error.WriteLine($_.Exception.Message);exit 1}'
     $info=New-Object Diagnostics.ProcessStartInfo
     $info.FileName='powershell.exe'
-    $info.Arguments='-NoProfile -ExecutionPolicy Bypass -EncodedCommand '+[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
     $info.WorkingDirectory=$Source
     $info.UseShellExecute=$false;$info.CreateNoWindow=$true
     $info.RedirectStandardOutput=$true;$info.RedirectStandardError=$true

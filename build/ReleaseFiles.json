@@ -19,5 +19,7 @@
     "Install-ICloudFolderSetup.ps1",
     "Install-ICloudFolderSetup.cmd",
     "ICloudFolderCopy.psm1",
-    "Copy-ICloudFolderFiles.ps1"
+    "Copy-ICloudFolderFiles.ps1",
+    "docs/CLI.md",
+    "docs/DEVELOPMENT.md"
 ]

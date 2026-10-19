@@ -5,8 +5,6 @@
 - Adds separate graphical copy/merge actions for iCloud and Windows default folders. Copies retain originals, skip identical files, refuse conflicting contents, and verify SHA-256 without changing folder settings.
 - Rewords file-handling and manual-folder acknowledgement checkboxes in plain language.
 
-
-
 - Creates the GUI rendering test's output directory explicitly so validation works on clean Windows runners. The failed v2.3.0 tag was not published.
 
 - Adds a graphical Explorer interface for every supported setup, reset, restore, diagnostic and cloud-test option, with pickers, preview/dry run and explicit confirmation.

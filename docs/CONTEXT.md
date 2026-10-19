@@ -2,91 +2,60 @@
 
 ## Purpose and boundaries
 
-This repository contains a per-user Windows folder-path configurator for iCloud Drive. The original batch and broad registry snapshot have been retired. `Set-ICloudFolders.ps1` is the CLI; `ICloudFolders.psm1` contains the implementation; `Set-ICloudFolders.cmd` is a convenience launcher. `.idea` is local IDE state and is ignored. There is no application build, service, package installation, or Java dependency.
+A per-user Windows Known Folders configurator with graphical and CLI entry points, Windows-default reset, exact backup restore and separately approved copy/merge. It does not install iCloud, configure synchronization, automatically migrate files or modify unrelated profile entries.
 
-`Open-ICloudFolderSetup.cmd` is the Explorer entry point. It runs `Open-ICloudFolderSetup.ps1` using a process-only execution-policy override, then pauses and returns the script's exit code. The script previews first, applies only after an exact `APPLY` response, and stops on preview/apply errors. It uses the same module without changing mappings or bypassing any preflight checks. Advanced options remain on the CLI. The original CLI launchers retain their unattended behavior.
+The [repository layout and development workflow](DEVELOPMENT.md), [CLI reference](CLI.md), and [measured verification history](VERIFICATION.md) are separate documents. Keep architecture decisions here and historical test evidence in verification.
 
-Version 2.1 adds `Test-ICloudFolders.ps1` and `Check-ICloudFolderSetup.cmd` for read-only diagnostics. They report root registration, mappings, destination existence and Windows folder resolution, with explicit unknown cloud status. Friendly plan labels are derived from `Get-FolderMap`; raw value names remain available in JSON diagnostics. See `docs/VERIFICATION.md` for the full validation and signing policy.
+## Components
 
-The expanded Windows CI matrix passed six OS/shell local-suite jobs, three isolated 41-check integration/API jobs and package verification. The standard Save dialog default path is observed through its own COM API in a dedicated disposable fixture, then that fixture process is terminated; no user input is injected. Signing support is optional and staged-only. On 2026-10-18, a real Windows Documents upload was observed on iCloud.com, renamed through its visible UI, and received back in Windows with the exact original SHA-256 and the old name absent. Read-only diagnostics remained healthy. See `docs/VERIFICATION.md` for the measured scope and remaining compatibility limits.
+| File | Role |
+| --- | --- |
+| ICloudFolders.psm1 | Central Get-FolderMap, registration/default lookup, checked registry writes, backup, rollback and diagnostics. |
+| ICloudFolderCopy.psm1 | Explicit non-overwriting copy plans and hash-verified execution. |
+| ICloudFolderSetup.UI.psm1 | Controls, option routing, asynchronous worker and confirmation. |
+| ICloudFolderSetup.Install.psm1 | Allowlisted copies, installed-file verification and current-user shortcuts. |
+| Start-ICloudFolderSetup.ps1 / Install-ICloudFolderSetup.ps1 | Graphical setup/installer entry points. |
+| Set-ICloudFolders.ps1 / Test-ICloudFolders.ps1 / Copy-ICloudFolderFiles.ps1 | Thin command-line entry points used by the GUI worker. |
+| Open-ICloudFolderSetup.ps1 | Retained text-based compatibility wrapper. |
 
-The Explorer wrapper passed five isolated checks using a stub module: cancel, explicit apply, other input cancelling, preview failure preventing apply, and apply failure returning a nonzero exit code. The existing 16 regression scenarios also passed after adding the wrapper. No live host-account apply was used to test the launcher.
+CMD entry points stay at the root with runtime scripts/modules. The GUI/package/installer depend on those paths. Folder mappings must not be duplicated in a second component.
 
-## Decisions
+## Folder and registry decisions
 
-- `-ResetToDefaults` uses `Get-FolderMap -IncludeMusic -SystemDefaults`: canonical Known Folder IDs are centralized alongside the aliases in `Get-FolderMap`, and all seven default paths come from Windows `SHGetKnownFolderPath`. Flags `0x4600` combine DEFAULT_PATH, NOT_PARENT_RELATIVE and DONT_VERIFY: current and parent redirections are ignored and missing default directories are not created by the query. The returned allocation is freed even on failure. All defaults are resolved and validated before backup creation or settings writes; no guessed-path fallback is used. The normal iCloud mapping remains unchanged. See [Microsoft's flag semantics](https://learn.microsoft.com/en-us/windows/win32/api/shlobj_core/ne-shlobj_core-known_folder_flag).
-- Reset never reads historical backups; corrupt or missing old backup files cannot determine its destinations or prevent its operation. A new exact backup of current values is still mandatory before apply. The existing checked registry backend synchronizes all local aliases and retains rollback; this is not a claim to duplicate Explorer's undocumented implementation or file-moving UI. Reset skips iCloud availability/registration checks and rejects cloud options or backup restore in the same invocation. It retains content gating, preview/WhatIf and destination probes. Use a valid old backup to recover custom previous paths; reset chooses Windows defaults instead. The Explorer wrapper requires exact `RESET` acknowledgement of leaving existing content in place. No unrelated profile entries are added.
-- The Windows-default API implementation passed all ten jobs in [run 39136143690](https://github.com/NotSandyFromKentucky/Windows-iCloudDrive_Sync_Setup/actions/runs/39136143690), commit `4a896dd`: 26 core, ten launcher and five diagnostic scenarios across all six OS/shell combinations, 53 real integration checks on each image, and package verification. Tests confirm that current redirection does not affect the requested default, corrupt historical backups are ignored, API lookup failures stop before writes without guessing, and reset is reversible using its fresh backup. Actual-account API preview and WhatIf left all User Shell Folders values unchanged. No live developer-account reset was performed.
-- Reset tests mock the profile root as well as the registry so even local destination creation stays in test fixtures. Five additional reset scenarios and five reset-wrapper scenarios cover read-only modes, conflicts/content gating, aliases including Music, source retention, exact rollback and undo. [Run 39135664146](https://github.com/NotSandyFromKentucky/Windows-iCloudDrive_Sync_Setup/actions/runs/39135664146), commit `3ab6d55`, passed all ten jobs: 24 core, ten launcher and five diagnostic scenarios across six OS/shell jobs; 49 real integration checks per disposable image, including reset/restore; and package verification. Actual-account preview and WhatIf also passed with the complete User Shell Folders snapshot unchanged. No live reset was applied to the developer account.
+- Get-FolderMap is authoritative for canonical entries and aliases. Pictures maps to Pictures; old Images content is not automatically merged. Music is optional for iCloud setup; reset includes it. No OneDrive-specific or unrelated entries are modified.
+- New values are normalized absolute REG_EXPAND_SZ strings. Existing types and unexpanded strings are preserved exactly in backups; unsupported original types abort.
+- SyncRootManager iCloudDrive registrations validate the current account's active root. A known mismatch cannot be overridden. Manual verification is a fallback only if no registration exists; registration never proves sync health.
+- Reset uses Get-FolderMap with SystemDefaults. Canonical Known Folder IDs are defined alongside the mapping. SHGetKnownFolderPath flags 0x4600 request defaults independently of current/parent redirection without creating absent directories. Allocations are freed even on error; failed queries have no guessed fallback.
+- Historical backups are never needed for reset. Every apply/reset/restore still creates a fresh exact recovery record.
+- The checked registry backend remains intentional. The isolated SHSetKnownFolderPath experiment changed both User Shell Folders and Shell Folders, but a seeded local Documents alias did not follow. Replacing the backend would require separate alias handling and a larger backup/verification surface. See verification for the measured results.
 
-- One canonical mapping lives in `Get-FolderMap`. Pictures and its local alias use `Pictures`; no `Images` directory is created. Music is optional. Desktop and Downloads local aliases are included to keep those entries consistent too.
-- No OneDrive-specific identifiers are modified. Old runs may have changed those values; this tool cannot infer their original paths and does not silently repair them. Restore such values from a known prior backup or the relevant provider's settings.
-- The old `.reg` file is removed rather than generated: importing a file would bypass preflight, backup, checked writes, and rollback. Historical values are not a trustworthy rollback baseline.
-- New values use `REG_EXPAND_SZ` with normalized absolute paths. This supports an explicit root on another drive without manufacturing environment-variable substitutions. Backups preserve original types and unexpanded values exactly. Unexpected original types abort instead of being coerced.
-- Windows SyncRootManager's `iCloudDrive!*` registrations and `UserSyncRoots` SID value provide root validation where available. Registration layouts may vary; `-VerifiedSyncRoot` is an explicit manual fallback when no registration is found. It cannot override a known mismatch. Registration does not prove sign-in or sync health.
-- The current implementation retains scoped User Shell Folders registry writes for explicit alias control and exact restoration of originally absent entries. [SHSetKnownFolderPath](https://learn.microsoft.com/en-us/windows/win32/api/shlobj_core/nf-shlobj_core-shsetknownfolderpath) was evaluated: it provides documented folder redirection, but switching mechanisms needs isolated integration tests for additional side effects and alias behavior. Do not combine an API call with registry writes without expanding backup and verification coverage. See also [Known Folders](https://learn.microsoft.com/en-us/windows/win32/shell/known-folders) and [known-folder identifiers](https://learn.microsoft.com/en-us/windows/win32/shell/knownfolderid).
-- Explicit copy/merge is a separate operation in ICloudFolderCopy.psm1 and Copy-ICloudFolderFiles.ps1, requested by the user. Setup, reset and restore do not automatically migrate files. Existing-content opt-in still gates pointer changes. Copy keeps every source, refuses different same-name collisions before writing, verifies SHA-256, and never overwrites destination files. No implicit move/delete commands are added.
-- Default execution is read-only. `-Apply` and `ShouldProcess` gate mutations. Recovery files go under local application data, outside redirected sources/destinations; overlapping storage aborts. A per-account mutex serializes this tool, and a second snapshot comparison detects changes before the first write. This is not an OS registry transaction and cannot prevent changes by other applications.
+## Settings-change flow
 
-## Change flow
+1. Acquire the account mutex and snapshot current values without expansion.
+2. Validate destinations, source content, recovery location and complete plan.
+3. Return for preview, or enforce apply conditions and ShouldProcess.
+4. Write, parse, validate and compare an account-bound exact backup.
+5. Probe destination access and compare the snapshot again before writes.
+6. Write/check every desired value and the complete set. On failure, restore/check all original values, including deletion of values originally absent.
 
-1. Acquire per-account mutex; read current values without environment expansion.
-2. Validate root, source paths/content, destination structure, and recovery location. Display complete old/new plan.
-3. Return for preview, or validate apply conditions and call `ShouldProcess`.
-4. Write recovery JSON; parse, validate, and compare it with the captured snapshot and current settings.
-5. Create/probe all destinations, then recheck the snapshot before registry writes.
-6. Write and verify each desired value, then verify the complete set. On failure, attempt and verify restoration of every original value; report any rollback errors and recovery path.
+Recovery storage must not overlap source/destination trees. Manual restore accepts only the mapped allowlist and current SID, requires original destinations to be available, and makes a fresh backup of current settings. No file movement or directory deletion is part of settings changes. Crash/power-loss recovery is manual. Other applications can still change settings; the mutex is not an OS-wide registry transaction.
 
-Manual restore uses the same backup/write/verification/recovery flow, accepts only mapped names and the current SID, and requires original existing paths to be available. It does not remove created folders or move data.
+## Graphical flow and installation
 
-## Validation and release limits
+Get-SetupRequest maps controls to existing scripts without duplicating registry logic. Encoded data passes user paths as data to a hidden child process. Output is read asynchronously; closing is blocked while running. Apply requires a matching successful preview/dry run and default-No confirmation. Option changes invalidate preview. The backend remains responsible for ShouldProcess and safety checks.
 
-The dependency-free PowerShell tests exercise preview and WhatIf without writes, missing root verification, registered-root mismatch, injected destination-access failure, file obstruction, existing-content gating, partial-write rollback, exact original type/absence restoration, scoped aliases, unrelated values, repeated apply, manual restore, rejected backup scope/SID, optional Music, Unicode and `!`/space paths, and incomplete rollback reporting. The fake registry is deliberate: running tests must not redirect the developer's folders.
-
-The CLI is also checked using real read-only registry access. The fake-registry suite alone does not certify the production registry write boundary; isolated integration covers that boundary on the tested guests. The expanded CI evidence and live cloud round trip are recorded in `docs/VERIFICATION.md`. They do not certify every application's saved preferences, other iCloud releases or all Explorer behavior after sign-out/sign-in.
-
-Windows Sandbox integration on 2026-10-18: all 29 checks in `tests/Invoke-SandboxIntegration.ps1` passed using the real guest registry and filesystem. This verified 13 mapped values including Music, mutation-free preview/WhatIf, stable repeated apply, preservation of a source file, restore preview, exact restoration of the complete original registry snapshot (including absent aliases), and exact rollback after two real writes followed by an injected failure. A fresh process's Documents API resolved the redirected path. The host's complete User Shell Folders snapshot was unchanged before/after.
-
-The Sandbox used a synthetic guest-local root, not an iCloud installation. Networking, clipboard, devices and GPU sharing were disabled. Only staged code was mapped read-only; a separate ignored `.local/sandbox/<run>/results` folder accepted logs and JSON results. The test refuses to run unless it is the `WDAGUtilityAccount` guest with a different SID and computer name from its staging marker. Do not run it directly on the host. Generated `.wsb` configurations and personal host snapshots stay under `.local` and are not committed.
-
-This Sandbox run validates the production registry write boundary on the tested guest. Later disposable CI runs separately verified real access-denied conditions and interrupted-write recovery; the live round trip separately verified cloud upload and a returned remote rename. Explorer/application behavior after sign-out/sign-in and other iCloud registration layouts remain outside those results.
-
-After the run, the test Sandbox client was closed and the temporarily enabled Windows Sandbox feature was disabled successfully with `-NoRestart`. Windows reported that another restart is required to finish disabling it; no automatic restart was performed.
-
-Verification on 2026-10-17: all 16 regression scenarios passed under Windows PowerShell 5.1; all PowerShell files parsed without syntax errors. A real default CLI preview returned exit code 0 and flagged existing source content, and an invalid-root CLI invocation returned exit code 1. Neither invocation used `-Apply`; user-shell settings were not changed.
-
-After the user manually applied the Explorer setup, read-only checks of the real account confirmed all 11 default registry mappings and destination directories, and all six resolved Windows folder paths matched the plan. The setup log recorded completion and its recovery backup matched the account. iCloud Drive's registered root matched and its process was running. This verifies the current folder configuration, but does not prove cloud synchronization or all application save-dialog behavior. No live host-account apply was performed by the development tests.
-
-Before deploying to another account/machine, run isolated Windows integration checks:
-
-- Capture original known-folder API results and registry state, apply, sign out/in, and compare Explorer/API resolutions against the plan for all aliases.
-- Verify default and custom roots against installed iCloud registration, and test disabled/unavailable iCloud.
-- Exercise real access-denied conditions, partial writes, unavailable restore destinations, and recovery following a terminated process.
-- Verify existing files remain intact, a test file synchronizes, and manual restore returns the account to its original state. Test PowerShell execution policy and launcher exit codes.
-
-No live host-account folder redirection is part of development verification. Registry/cloud integration results must be recorded when actually performed; do not infer them from the mock tests.
-
-## Releases
-
-The legacy GitHub release uses the tag `Release`; preserve it and `v2.0.0`. Versioned distribution started with `v2.0.0` because the old batch entry point was replaced by a multi-file PowerShell utility. Version 2.1 introduces CI and automated version-tag publication. A push to `main` runs validation; only a version tag (or manual release workflow on an already tagged commit) can publish a release.
-
-For a release, commit and test the intended source. `tools/New-ReleasePackage.ps1` uses `git archive` with the versioned `build/ReleaseFiles.json` allowlist, optionally signs staged PowerShell files with an existing valid certificate, adds a per-file manifest and generates `SHA256SUMS.txt`. `tools/Test-ReleasePackage.ps1` verifies contents, hashes, syntax and declared signatures. Never package `.local`, IDE state, credentials, personal registry snapshots, recovery files, or test output.
-
-Create an immutable version tag on that commit. `.github/workflows/release.yml` calls the full Windows validation workflow, then `tools/Publish-Release.ps1` creates/resumes a draft, uploads the ZIP/checksum, downloads and verifies both assets, and publishes using the corresponding changelog section. It refuses to modify a published version. The default token is read-only; only publication receives contents-write. Action dependencies are pinned to official commit IDs.
-
-## Graphical setup and per-user installation
-
-Start-ICloudFolderSetup.ps1 and ICloudFolderSetup.UI.psm1 provide the Explorer UI. All supported setup options, Windows-default reset, trusted backup restore, dry run, read-only diagnostics/JSON, cloud-test start/check/cleanup, recovery/help and result export are available without typed commands. Get-SetupRequest maps controls to existing scripts; no registry logic or folder maps are duplicated. Encoded data transports user paths to a hidden child process without code interpolation. The UI disables controls while running, collects output asynchronously, and requires a fresh matching preview or dry run plus default-No confirmation before mutation. Changing any option invalidates preview. Core ShouldProcess and rollback remain authoritative.
-
-Install-ICloudFolderSetup.cmd opens the per-user installer. ICloudFolderSetup.Install.psm1 copies only manifest/central-release-listed files into a unique version directory, checks copied hashes before shortcut creation, optionally creates a desktop shortcut, and preserves prior binaries and same-name shortcuts. Installation never redirects folders or installs iCloud. It is optional; portable use remains supported. The legacy console PS1 wrapper stays available, while the Explorer setup/reset/check CMD files now open the graphical window.
-
-tests/Test-SetupUI.ps1 uses a stub child script and temporary install/shortcut locations. It renders the real WinForms window, exercises preview completion and invalidation, checks every option/mode, tests Unicode and shell metacharacters as data, tests installer WhatIf/copies/reinstall/shortcut targets, and rejects unsafe manifest paths. It creates no user-shell registry values or real Start menu/Desktop shortcuts. CI invokes it across the existing OS/shell matrix. Rendering evidence remains ignored under .local. No live developer-account redirection is used for UI testing.
-
+The optional installer copies only manifest/central-release-listed files into a unique per-user version directory. It verifies copies before shortcut creation, preserves old binaries and backs up same-name shortcuts. It never redirects folders or installs iCloud. Portable execution and the legacy console wrapper remain supported.
 
 ## Explicit copy/merge
 
-The copy UI actions target iCloud folders or Windows defaults. Get-CopyPairs reuses Get-FolderMap and Read-FolderValue inside the core module, deduplicates alias pairs, and uses the existing registration validation/default-path lookup. There is no second folder map. Copy never writes registry settings; it uses the same account mutex as setup/restore.
+Get-CopyPairs reuses the core mapping/value reads, deduplicates alias pairs and validates registration/default destinations. Copy uses the same account mutex but never writes registry settings.
 
-Preview builds a recursive plan and hashes file contents. Apply requires ShouldProcess, rebuilds the plan before writing, rechecks source/destination paths and hashes, uses File.Copy with overwrite disabled, and verifies new destination hashes. Identical files are skipped. Different same-name files, conflicting alias content, blocked directory paths and source/destination overlap abort preflight. Reads can hydrate cloud placeholders. A native FindFirstFile tag query permits Windows Cloud Files reparse tags while refusing name-surrogate links, junctions and unsupported tags. Source and destination ancestors are checked too.
+Preview hashes contents. Apply rebuilds the plan, checks paths and source/destination hashes, uses File.Copy with overwrite disabled, and verifies new contents. Identical files are skipped. Conflicting aliases or filenames, file/folder obstructions, overlap, encryption and unsupported reparse points stop the operation. Ancestors are checked; native tag lookup permits Windows Cloud Files placeholders while refusing junctions/symbolic links. Reading placeholders may hydrate content.
 
-Failures retain sources and any partial destination copies. This intentionally does not attempt filesystem rollback by deleting files. No metadata-complete backup or live-file snapshot guarantee is claimed. tests/Test-FolderCopy.ps1 uses fixture files and injected read failure, tests preview/WhatIf, copying/identical retries, conflicts, empty directories, Unicode paths, overlap, aliases, junction refusal and source retention after partial copying. The UI suite checks both copy routes. No actual host Documents/Desktop files are copied as development tests, and real iCloud hydration/copy remains unverified.
+Sources are always retained. Partial destination copies remain on failure for inspection; no deletion-based rollback is attempted. This is not a metadata-complete backup or an application-consistent snapshot. Live iCloud hydration/copy is still outside fixture-test evidence.
+
+## Validation and distribution
+
+Local tests use fake registry access or unique file/GUI/install fixtures. Real integration is restricted to guarded disposable guests. Never use live developer-account redirection as a test. One real cloud round trip was observed on 2026-10-18; that does not certify all providers, versions or applications.
+
+VERSION and build/ReleaseFiles.json define distribution inputs. Packages are built from exact committed source, optionally signed in staging, manifested and checksummed. Version-tag publication is gated by CI and remote-byte verification. Published tags/assets are immutable. Detailed commands and evidence belong in the linked development and verification guides.
