@@ -16,6 +16,14 @@ public static class ICloudPickerDriver
     static string fixtureRoot;
     [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)]
     static extern bool IsWindowVisible(IntPtr handle);
+    [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr handle,out uint processId);
+    [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] static extern bool IsChild(IntPtr parent,IntPtr child);
+    [DllImport("user32.dll",CharSet=CharSet.Unicode,SetLastError=true)]
+    static extern IntPtr SendMessageTimeout(IntPtr handle,uint message,IntPtr wparam,IntPtr lparam,uint flags,uint timeout,out IntPtr result);
+    static void EditMessage(IntPtr handle,uint message,IntPtr wparam,IntPtr lparam){
+        IntPtr result;
+        Assert(SendMessageTimeout(handle,message,wparam,lparam,2,5000,out result)!=IntPtr.Zero,"Filename edit did not process its input message");
+    }
     static void Assert(bool condition,string message){if(!condition)throw new InvalidOperationException(message);}
     static void Wait(Func<bool> condition,string message){
         var end=DateTime.UtcNow.AddSeconds(30);
@@ -53,7 +61,18 @@ public static class ICloudPickerDriver
         // Set the editable child rather than the host's independent value.
         var edit=field.Current.ControlType==ControlType.Edit ? field : field.FindFirst(TreeScope.Descendants,new PropertyCondition(AutomationElement.ControlTypeProperty,ControlType.Edit));
         var value=(ValuePattern)(edit ?? field).GetCurrentPattern(ValuePattern.Pattern);
-        value.SetValue(path);
+        if(Id(dialog,"FileNameControlHost")!=null){
+            // ValuePattern updates this host's displayed text without the edit
+            // notifications used by the save dialog's selected-path model.
+            // Deliver character messages to its verified child HWND. This does
+            // not use SendInput, switch desktops or touch the input desktop.
+            Assert(edit!=null,"Modern picker filename edit missing");
+            var handle=new IntPtr(edit.Current.NativeWindowHandle);uint owner;
+            GetWindowThreadProcessId(handle,out owner);
+            Assert(handle!=IntPtr.Zero && owner==(uint)process.Id && IsChild(DialogHandle(),handle),"Filename edit is not owned by this picker");
+            EditMessage(handle,0xB1,IntPtr.Zero,new IntPtr(-1)); // EM_SETSEL: replace all text
+            foreach(char character in path)EditMessage(handle,0x102,new IntPtr(character),IntPtr.Zero); // WM_CHAR
+        }else value.SetValue(path);
         Assert(value.Current.Value==path,"Picker filename edit did not retain the requested path");
         var commit=Button("1");
         Console.WriteLine("Choosing picker path: "+path+"; control: "+commit.Current.Name);
