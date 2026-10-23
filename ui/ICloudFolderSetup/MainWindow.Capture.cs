@@ -4,6 +4,7 @@ using Microsoft.UI.Xaml.Media.Imaging;
 using Windows.Graphics.Imaging;
 using Windows.Storage.Streams;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
 using System.Text.Json;
 using Windows.UI.ViewManagement;
@@ -37,6 +38,7 @@ public sealed partial class MainWindow
             AppWindow.Resize(new Windows.Graphics.SizeInt32((int)Math.Round(w*scale),(int)Math.Round(h*scale)));
         }
         await Task.Delay(500);
+        if(Array.IndexOf(arguments,"--fixture-custom-paths")>=0)CustomizePaths.IsChecked=true;
         Root.UpdateLayout();
         double fontScale=double.Parse(Argument("--fixture-font-scale") ?? "1",System.Globalization.CultureInfo.InvariantCulture);
         if(fontScale<1 || fontScale>2) throw new ArgumentException("Fixture font scale outside supported bounds.");
@@ -121,6 +123,8 @@ public sealed partial class MainWindow
             WindowsColor=windows.ToString(),ExpectedWindowsColor=expected.ToString(),CloudColor=cloud.ToString(),
             Keyboard=keyboard,KeyboardBoundary=keyboardBoundary,KeyboardReverse=keyboardReverse,
             Layout=new {Action=Snapshot().Action,Width=Root.ActualWidth,Height=Root.ActualHeight,
+                CustomPaths=CustomizePaths.IsChecked==true,
+                Destinations=destinationRows.Where(_=>FolderDestinations.Visibility==Visibility.Visible).Select(row=>new{row.Definition.Id,Display=Bounds(row.Display),Editor=Bounds(row.Editor),Browse=Bounds(row.EditRow.Children.OfType<Button>().Single())}).ToArray(),
                 Preview=Bounds(Preview),DryRun=Bounds(DryRun),Apply=Bounds(Apply),CloudRoot=Bounds(CloudRootRow),Backup=Bounds(BackupRow),Viewport=Bounds(MainScroll)}
         }));
         File.Move(path+".json.tmp",path+".json",true);

@@ -41,10 +41,16 @@ try {
     $report = Test-ICloudFolderSetup -ICloudRoot $fixture -IncludeMusic
     Assert (-not $report.Healthy -and $report.Errors.Count -eq 7 -and $report.RegistryValues.Count -eq 13) 'Resolution failures or optional Music were missed.'
     Write-Host 'PASS: resolution failures are reported; Music is optional'
+    $custom=Join-Path $fixture 'Personal files'
+    $report=Test-ICloudFolderSetup -ICloudRoot $fixture -FolderPaths @{Documents=$custom}
+    $documents=@($report.RegistryValues|Where-Object {$_.Folder -like 'Documents*'})
+    Assert ($documents.Count -eq 2 -and @($documents|Where-Object {$_.Expected -cne $custom -or $_.Matches}).Count -eq 0) 'Custom diagnostic paths differ across aliases.'
+    Assert (($report.ResolvedFolders|Where-Object Folder -eq 'Documents').Expected -ceq $custom) 'Resolved-folder diagnostic lost the custom destination.'
+    Write-Host 'PASS: custom diagnostic expectations share destinations across aliases and folder resolution'
     $after = @(Get-ChildItem -LiteralPath $fixture -Recurse -Force | Select-Object -ExpandProperty FullName) -join "`n"
     Assert ($before -ceq $after) 'Diagnostic check changed filesystem contents.'
     Write-Host 'PASS: diagnostics create no files or directories'
-    Write-Host '5 diagnostic checks passed.'
+    Write-Host '6 diagnostic checks passed.'
 } finally {
     Remove-Module $module -Force
     $resolved = [IO.Path]::GetFullPath($fixture)

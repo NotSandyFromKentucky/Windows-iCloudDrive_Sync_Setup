@@ -3,6 +3,19 @@
 The [graphical setup](../README.md) exposes the supported operations without typed commands. This guide is for automation and advanced use. Run commands from the extracted package/repository root as the account being configured, without administrator elevation. Windows PowerShell 5.1 is the runtime used by the launchers.
 
 All folder-setting and copy commands default to preview. Process-only execution-policy overrides shown below do not change machine policy.
+
+## Custom iCloud destinations
+
+From PowerShell, pass a hashtable to `-FolderPaths` for setup, iCloud copying or diagnostics. Keys are Desktop, Documents, Pictures, Videos, Downloads, Captures and optional Music. Values must be absolute local paths inside the selected iCloud root. Unspecified folders keep their default destinations; aliases always share a destination. Include `-IncludeMusic` to customize Music. Duplicate/overlapping folders are refused, except Captures may be beneath Videos. Reset and backup restore do not accept overrides.
+
+```powershell
+$paths = @{ Documents = "$env:USERPROFILE\iCloudDrive\Personal files" }
+.\Set-ICloudFolders.ps1 -FolderPaths $paths
+.\Copy-ICloudFolderFiles.ps1 -FolderPaths $paths
+.\Test-ICloudFolders.ps1 -FolderPaths $paths
+```
+
+Keep the same overrides when separately copying, changing locations and checking them. These commands remain previews/read-only; use the documented apply flow only after reviewing the plan. The native interface retains your advanced choices for the current session.
 ## Preview
 
 From this directory:

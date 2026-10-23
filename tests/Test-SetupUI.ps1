@@ -33,6 +33,11 @@ try{
         Assert (-not $r.Options.ContainsKey('WhatIf')) 'Explicit cloud action remained preview'
     }
     Assert (-not (Get-SetupRequest -Action 'Check cloud return').Mutates) 'Return check marked as mutation'
+    foreach($action in @('Set up iCloud folders','Copy files into iCloud folders','Check iCloud configuration')){
+        $r=Get-SetupRequest -Action $action -Root 'C:\cloud' -FolderPaths @{Documents='C:\cloud\Personal files'}
+        Assert ($r.Options.FolderPaths.Documents -ceq 'C:\cloud\Personal files') 'Custom destinations were lost in action routing'
+    }
+    Expect-Failure {Get-SetupRequest -Action 'Reset to Windows defaults' -FolderPaths @{Documents='C:\cloud\Personal'}}
     $r=Get-SetupRequest -Action 'Copy files into iCloud folders' -Root 'C:\cloud' -Music $true -Verified $true -Phase DryRun
     Assert ($r.Script -eq 'Copy-ICloudFolderFiles.ps1' -and $r.Options.Apply -and $r.Options.WhatIf -and $r.Options.IncludeMusic -and $r.Options.VerifiedSyncRoot) 'Copy options/dry run lost'
     $r=Get-SetupRequest -Action 'Copy files into Windows default folders'

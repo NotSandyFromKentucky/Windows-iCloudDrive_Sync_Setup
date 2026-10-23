@@ -41,6 +41,7 @@
                                          "ui/ICloudFolderSetup/BackendClient.cs",
                                          "ui/ICloudFolderSetup/ICloudFolderSetup.csproj",
                                          "ui/ICloudFolderSetup/MainWindow.Capture.cs",
+                                         "ui/ICloudFolderSetup/MainWindow.Folders.cs",
                                          "ui/ICloudFolderSetup/MainWindow.xaml",
                                          "ui/ICloudFolderSetup/MainWindow.xaml.cs",
                                          "ui/ICloudFolderSetup/packages.lock.json"

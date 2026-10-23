@@ -52,6 +52,12 @@
          <Button Grid.Column="1" Content="Choose…" VerticalAlignment="Bottom" Click="BrowseBackup" AutomationProperties.AutomationId="BrowseBackup" AutomationProperties.Name="Choose recovery backup" />
         </Grid>
         <CheckBox x:Name="Music" Content="Include Music" Checked="OptionsChanged" Unchecked="OptionsChanged" AutomationProperties.HelpText="Include Music in this action. Reset to Windows defaults always includes Music." />
+        <StackPanel x:Name="FolderDestinations" Spacing="12">
+         <TextBlock Text="Folder destinations" Style="{StaticResource SubtitleTextBlockStyle}" />
+         <TextBlock Text="These are the proposed locations. Existing files stay in place until you separately choose to copy them." TextWrapping="Wrap" />
+         <CheckBox x:Name="CustomizePaths" Content="Customize each folder (advanced)" Checked="OptionsChanged" Unchecked="OptionsChanged" AutomationProperties.AutomationId="CustomizePaths" AutomationProperties.HelpText="Type or browse for each destination inside the selected iCloud Drive folder. Changes require a new preview." />
+         <StackPanel x:Name="DestinationRows" Spacing="12" />
+        </StackPanel>
         <Expander x:Name="Advanced" Header="Advanced options" HorizontalAlignment="Stretch">
          <StackPanel Spacing="12">
           <CheckBox x:Name="ManualRoot" Checked="OptionsChanged" Unchecked="OptionsChanged" AutomationProperties.HelpText="Use only when Windows has no iCloud registration. A known folder mismatch cannot be overridden."><TextBlock Text="Use a manually verified iCloud folder" TextWrapping="Wrap" /></CheckBox>

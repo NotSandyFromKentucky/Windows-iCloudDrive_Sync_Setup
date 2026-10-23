@@ -9,12 +9,22 @@ $code=1;$text='';$message='The action could not start. Review technical details 
 try{
     $request=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($EncodedRequest)) | ConvertFrom-Json
     if($request.Phase -notin @('Preview','DryRun','Apply')){throw 'Unsupported operation phase.'}
+    if($request.Action -eq 'Get folder definitions'){
+        if($request.Phase -ne 'Preview'){throw 'Folder definitions are read only.'}
+        Import-Module (Join-Path $root 'ICloudFolders.psm1') -Force
+        $definitions=Get-ICloudFolderDefinitions | ConvertTo-Json -Depth 4 -Compress
+        [Console]::Out.WriteLine(('@@ICloudResult:'+([pscustomobject]@{ExitCode=0;Message='Folder definitions loaded.';Text=$definitions}|ConvertTo-Json -Compress)))
+        exit 0
+    }
     Import-Module (Join-Path $root 'ICloudFolderSetup.UI.psm1') -Force
     if($request.Action -eq 'Install for me'){
         if($request.Phase -ne 'Apply'){throw 'Installation requires explicit confirmation.'}
         $plan=[pscustomobject]@{Script='tools\Invoke-WinUIInstall.ps1';Options=@{DesktopShortcut=[bool]$request.DesktopShortcut}}
     }else{
         $options=@{Action=[string]$request.Action;Root=[string]$request.Root;Backup=[string]$request.Backup;Music=[bool]$request.Music;Verified=[bool]$request.Verified;KeepFiles=[bool]$request.KeepFiles;Json=[bool]$request.Json;Phase=[string]$request.Phase}
+        if($request.PSObject.Properties['FolderPaths'] -and $request.FolderPaths){
+            $paths=@{};foreach($property in $request.FolderPaths.PSObject.Properties){$paths[$property.Name]=$property.Value};$options.FolderPaths=$paths
+        }
         $plan=Get-SetupRequest @options
     }
     if($request.CancelEventName -and $plan.Script -eq 'Copy-ICloudFolderFiles.ps1'){

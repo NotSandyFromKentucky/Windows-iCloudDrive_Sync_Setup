@@ -70,6 +70,27 @@ try{
     Assert ([IO.File]::ReadAllText((Join-Path $source 'a.txt')) -ceq 'original') 'Failure changed source'
     Assert (Test-Path (Join-Path $target2 'a.txt')) 'Partial-copy failure fixture did not exercise a completed destination write'
     'PASS: partial-copy failures retain originals and completed destination files for inspection'
+    $core=Import-Module (Join-Path $repo 'ICloudFolders.psm1') -Force -PassThru
+    $cloud=Join-Path $fixture 'cloud';$null=[IO.Directory]::CreateDirectory($cloud)
+    & $core {
+        param($Root,$Source)
+        $script:Root=$Root;$script:Source=$Source
+        function script:Get-RegisteredICloudRoots {$script:Root}
+        function script:Read-FolderValue {
+            param($Name)
+            [pscustomobject]@{Name=$Name;Exists=($Name -in @('Personal','{F42EE2D3-909F-4907-8871-4C22FC0BF756}'));Kind='ExpandString';Data=$script:Source}
+        }
+    } $cloud $source
+    $pairPath=Join-Path $fixture 'PairCopy.psm1';Copy-Item -LiteralPath (Join-Path $repo 'ICloudFolderCopy.psm1') -Destination $pairPath
+    $pairModule=Import-Module $pairPath -Force -PassThru
+    try{
+        & $pairModule {param($Core) $script:Core=$Core;function script:Import-Module {param($Name,[switch]$Force,[switch]$PassThru) $script:Core}} $core
+        $custom=Join-Path $cloud 'Personal files'
+        $pairs=@(& $pairModule {param($Root,$Custom) Get-CopyPairs -ICloudRoot $Root -FolderPaths @{Documents=$Custom} -ForApply} $cloud $custom)
+        Assert ($pairs.Count -eq 1 -and $pairs[0].Destination -ceq $custom -and $pairs[0].Source -ceq $source) 'Copy targets differ from custom setup paths or aliases were not deduplicated.'
+        Fail {& $pairModule {param($Custom) Get-CopyPairs -ResetToDefaults -FolderPaths @{Documents=$Custom}} $custom} 'cannot replace Windows defaults'
+        'PASS: custom copy destinations reuse the central map, deduplicate aliases and cannot override reset defaults'
+    }finally{Remove-Module $pairModule -Force;Remove-Module $core -Force}
     'All copy tests used isolated folders; no live folder settings or personal files were changed.'
 }finally{
     Remove-Module $module -Force

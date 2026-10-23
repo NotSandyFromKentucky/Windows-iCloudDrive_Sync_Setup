@@ -20,6 +20,7 @@ public sealed partial class MainWindow : Window
         InitializeComponent();
         Root.SizeChanged+=(_,_)=>RefreshCommandLayout();
         backend=new BackendClient(FindSource());
+        InitializeFolderRows(backend.ReadFolderDefinitions());
         AppWindow.Resize(new Windows.Graphics.SizeInt32(1060,860));
         Root.Loaded+=(_,_)=> {
             var scale=Root.XamlRoot.RasterizationScale;
@@ -46,6 +47,7 @@ public sealed partial class MainWindow : Window
     }
     private void RefreshCommandLayout()
     {
+        RefreshDestinationLayout();
         bool narrow=Root.ActualWidth<640;
         Grid.SetRow(Apply,narrow ? 1 : 0);Grid.SetColumn(Apply,narrow ? 0 : 2);Grid.SetColumnSpan(Apply,narrow ? 3 : 1);
         Apply.HorizontalAlignment=narrow ? HorizontalAlignment.Stretch : HorizontalAlignment.Left;
@@ -63,7 +65,7 @@ public sealed partial class MainWindow : Window
         Music.Visibility==Visibility.Visible && Music.IsChecked==true,
         ManualRoot.Visibility==Visibility.Visible && ManualRoot.IsChecked==true,
         KeepFiles.Visibility==Visibility.Visible && KeepFiles.IsChecked==true,
-        JsonOutput.Visibility==Visibility.Visible && JsonOutput.IsChecked==true);
+        JsonOutput.Visibility==Visibility.Visible && JsonOutput.IsChecked==true,FolderPathsJson:SnapshotFolderPaths());
     private void SetStatus(string title,string message,InfoBarSeverity severity=InfoBarSeverity.Informational)
     {
         Status.Title=title;Status.Message=message;Status.Severity=severity;
@@ -119,6 +121,8 @@ public sealed partial class MainWindow : Window
         CloudRootRow.Visibility=cloud ? Visibility.Visible : Visibility.Collapsed;
         BackupRow.Visibility=action=="Restore a recovery backup" ? Visibility.Visible : Visibility.Collapsed;
         Music.Visibility=cloud ? Visibility.Visible : Visibility.Collapsed;
+        FolderDestinations.Visibility=cloud ? Visibility.Visible : Visibility.Collapsed;
+        RefreshFolderRows();
         ManualRoot.Visibility=cloud && action!="Check iCloud configuration" ? Visibility.Visible : Visibility.Collapsed;
         KeepFiles.Visibility=action is "Set up iCloud folders" or "Reset to Windows defaults" ? Visibility.Visible : Visibility.Collapsed;
         Advanced.Visibility=ManualRoot.Visibility==Visibility.Visible || KeepFiles.Visibility==Visibility.Visible ? Visibility.Visible : Visibility.Collapsed;
@@ -167,6 +171,7 @@ public sealed partial class MainWindow : Window
         busy=value;
         foreach(var item in Navigation.MenuItems.Concat(Navigation.FooterMenuItems).OfType<Control>()) item.IsEnabled=!value;
         SetInteraction(Options,!value);
+        if(!value)RefreshFolderRows();
         Preview.IsEnabled=!value;DryRun.IsEnabled=!value;Apply.IsEnabled=false;Save.IsEnabled=!value;
         Stop.Visibility=value && options.IsCopy ? Visibility.Visible : Visibility.Collapsed;Stop.IsEnabled=value;
         Progress.Visibility=value ? Visibility.Visible : Visibility.Collapsed;

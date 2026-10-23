@@ -1,7 +1,8 @@
 #requires -Version 5.1
 Set-StrictMode -Version Latest
 function Get-SetupRequest {
-    param([string]$Action,[string]$Root,[string]$Backup,[bool]$Music,[bool]$Verified,[bool]$KeepFiles,[bool]$Json,[ValidateSet('Preview','DryRun','Apply')][string]$Phase='Preview')
+    param([string]$Action,[string]$Root,[string]$Backup,[bool]$Music,[bool]$Verified,[bool]$KeepFiles,[bool]$Json,[ValidateSet('Preview','DryRun','Apply')][string]$Phase='Preview',[hashtable]$FolderPaths=@{})
+    if($FolderPaths.Count -and $Action -notin @('Set up iCloud folders','Copy files into iCloud folders','Check iCloud configuration')){throw 'Custom folder paths are only available for iCloud setup, copy and checks.'}
     $options=@{}
     $mutates=$false
     switch ($Action) {
@@ -42,6 +43,7 @@ function Get-SetupRequest {
         'Clean up cloud test file' {$scriptFile='tools\Test-ICloudRoundTrip.ps1';$options.Mode='Cleanup';$mutates=$true}
         default {throw 'Choose a supported action.'}
     }
+    if($FolderPaths.Count){$options.FolderPaths=$FolderPaths}
     if($mutates){
         if($scriptFile -in @('Set-ICloudFolders.ps1','Copy-ICloudFolderFiles.ps1')){
             if($Phase -ne 'Preview'){$options.Apply=$true}
@@ -108,6 +110,7 @@ function Get-SetupOutcome {
     }else{
         $message=switch -Regex($Text){
             'nothing will be overwritten|Different source files|File/folder conflict' {'Copy could not start because files conflict. Compare the named files and rename or relocate the conflicting destination yourself, then preview again.';break}
+            'Custom folder destinations|Folder destinations|Unsupported custom folder' {'Review the named folder destination below. Use separate locations inside the selected iCloud Drive folder; Captures can stay beneath Videos. Then preview again.';break}
             'registration|registered iCloud' {'The iCloud folder could not be verified. Choose the folder shown in iCloud settings. Use manual verification only when Windows has no registration; a known mismatch cannot be overridden.';break}
             'Existing source content requires review' {'Existing files need your decision. Copy them using a separate copy action, or select the option to change locations without copying files, then preview again.';break}
             'backup|\bSID\b|\bschema\b' {'The recovery file could not be used. Choose a trusted before.json file for this Windows account and ensure its original destination folders are available.';break}

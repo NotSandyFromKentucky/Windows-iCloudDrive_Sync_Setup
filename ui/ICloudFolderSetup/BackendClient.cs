@@ -4,7 +4,7 @@ using System.Text.Json;
 
 namespace ICloudFolderSetup;
 
-public sealed record SetupOptions(string Action,string Root,string Backup,bool Music,bool Verified,bool KeepFiles,bool Json,bool DesktopShortcut=false)
+public sealed record SetupOptions(string Action,string Root,string Backup,bool Music,bool Verified,bool KeepFiles,bool Json,bool DesktopShortcut=false,string FolderPathsJson="")
 {
     public bool IsCopy => Action.StartsWith("Copy files",StringComparison.Ordinal);
     public bool Mutates => !Action.StartsWith("Check",StringComparison.Ordinal);
@@ -19,6 +19,7 @@ public sealed record SetupOptions(string Action,string Root,string Backup,bool M
 }
 public sealed record OperationResult(int ExitCode,string Message,string Text);
 public sealed record CopyProgress(string Stage,string File,int Completed,int Total);
+public sealed record FolderDefinition(string Id,string RelativePath);
 
 public sealed class BackendClient
 {
@@ -26,6 +27,12 @@ public sealed class BackendClient
     private bool running;
     public string Source {get;}
     public BackendClient(string source) => Source=Path.GetFullPath(source);
+    public FolderDefinition[] ReadFolderDefinitions()
+    {
+        var result=RunAsync(new SetupOptions("Get folder definitions","","",false,false,false,false),"Preview",_=>{}).GetAwaiter().GetResult();
+        if(result.ExitCode!=0)throw new IOException("Folder destinations could not be loaded. Extract or reinstall the complete package. "+result.Text);
+        return JsonSerializer.Deserialize<FolderDefinition[]>(result.Text) ?? throw new IOException("Folder definitions are missing.");
+    }
     public bool RequestStop() => cancel?.Set() ?? false;
     public async Task<OperationResult> RunAsync(SetupOptions options,string phase,Action<CopyProgress> progress)
     {
@@ -34,7 +41,8 @@ public sealed class BackendClient
         try {
             var eventName=options.IsCopy ? "Local\\ICloudCopy-"+Guid.NewGuid().ToString("N") : null;
             if(eventName!=null) cancel=new EventWaitHandle(false,EventResetMode.ManualReset,eventName);
-            var request=new {options.Action,options.Root,options.Backup,options.Music,options.Verified,options.KeepFiles,options.Json,options.DesktopShortcut,Phase=phase,CancelEventName=eventName};
+            var paths=string.IsNullOrEmpty(options.FolderPathsJson) ? null : JsonSerializer.Deserialize<Dictionary<string,string>>(options.FolderPathsJson);
+            var request=new {options.Action,options.Root,options.Backup,options.Music,options.Verified,options.KeepFiles,options.Json,options.DesktopShortcut,FolderPaths=paths,Phase=phase,CancelEventName=eventName};
             var encoded=Convert.ToBase64String(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(request)));
             var bridge=Path.Combine(Source,"tools","Invoke-WinUIBridge.ps1");
             if(!System.IO.File.Exists(bridge)) throw new FileNotFoundException("The application files are incomplete. Extract or reinstall the complete package.",bridge);
@@ -49,7 +57,7 @@ public sealed class BackendClient
             var errors=process.StandardError.ReadToEndAsync();
             OperationResult? result=null;
             var other=new StringBuilder();
-            while(await process.StandardOutput.ReadLineAsync() is {} line) {
+            while(await process.StandardOutput.ReadLineAsync().ConfigureAwait(false) is {} line) {
                 if(line.StartsWith("@@ICloudProgress:",StringComparison.Ordinal)) {
                     try {var item=JsonSerializer.Deserialize<CopyProgress>(line[17..]);if(item!=null) progress(item);}
                     catch(JsonException) {other.AppendLine("Unreadable progress message.");}
@@ -57,8 +65,8 @@ public sealed class BackendClient
                     result=JsonSerializer.Deserialize<OperationResult>(line[15..]);
                 } else other.AppendLine(line);
             }
-            await process.WaitForExitAsync();
-            var error=await errors;
+            await process.WaitForExitAsync().ConfigureAwait(false);
+            var error=await errors.ConfigureAwait(false);
             if(result==null) return new OperationResult(process.ExitCode==0 ? 1 : process.ExitCode,"The operation ended without a complete result. Review technical details before retrying.",other+error);
             if(result.ExitCode!=process.ExitCode) return new OperationResult(1,"The operation returned inconsistent results. Review technical details before retrying.",result.Text+Environment.NewLine+error);
             return result with {Text=result.Text+error};

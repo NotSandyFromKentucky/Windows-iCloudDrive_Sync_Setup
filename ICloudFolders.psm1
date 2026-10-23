@@ -4,7 +4,7 @@ $ErrorActionPreference = 'Stop'
 $script:ShellKey = 'Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders'
 
 function Get-FolderMap {
-    param([switch]$IncludeMusic, [switch]$SystemDefaults)
+    param([switch]$IncludeMusic, [switch]$SystemDefaults, [string]$Root, [hashtable]$FolderPaths=@{})
     # Registry aliases are deliberately explicit. No OneDrive-specific IDs.
     $map = [ordered]@{
         'Desktop' = 'Desktop'
@@ -22,6 +22,35 @@ function Get-FolderMap {
     if ($IncludeMusic) {
         $map['My Music'] = 'Music'
         $map['{A0C69A99-21C8-4671-8703-7934162FCF1D}'] = 'Music' # Local Music
+    }
+    if ($FolderPaths.Count -and ($SystemDefaults -or -not $Root)) { throw 'Custom folder paths require an iCloud root and cannot replace Windows defaults.' }
+    if ($Root) {
+        $FolderPaths=$FolderPaths.Clone()
+        $Root=Get-NormalPath $Root
+        $known=@{}
+        foreach($relative in @($map.Values | Select-Object -Unique)){
+            $id=if($relative -eq 'Videos\Captures'){'Captures'}else{$relative}
+            $known[$id]=$relative
+        }
+        foreach($id in @($FolderPaths.Keys)){
+            if(-not $known.ContainsKey($id)){throw "Unsupported custom folder: $id. Include Music before customizing Music."}
+            $path=Get-NormalPath $FolderPaths[$id]
+            if($path -ieq $Root -or -not(Test-WithinPath $path $Root)){throw "Custom folder destinations must be inside the selected iCloud Drive folder: $id"}
+            $FolderPaths[$id]=$path
+        }
+        $targets=@{}
+        foreach($id in $known.Keys){$targets[$id]=if($FolderPaths.ContainsKey($id)){$FolderPaths[$id]}else{Join-Path $Root $known[$id]}}
+        $ids=@($targets.Keys)
+        for($i=0;$i -lt $ids.Count;$i++){
+            for($j=$i+1;$j -lt $ids.Count;$j++){
+                $a=$ids[$i];$b=$ids[$j]
+                if($targets[$a] -ieq $targets[$b]){throw "Folder destinations must be different: $a and $b"}
+                if((Test-WithinPath $targets[$a] $targets[$b]) -or (Test-WithinPath $targets[$b] $targets[$a])){
+                    if(-not(($a -eq 'Captures' -and $b -eq 'Videos' -and (Test-WithinPath $targets[$a] $targets[$b])) -or ($b -eq 'Captures' -and $a -eq 'Videos' -and (Test-WithinPath $targets[$b] $targets[$a])))){throw "Folder destinations overlap: $a and $b"}
+                }
+            }
+        }
+        foreach($name in @($map.Keys)){$id=if($map[$name] -eq 'Videos\Captures'){'Captures'}else{$map[$name]};$map[$name]=$targets[$id]}
     }
     if ($SystemDefaults) {
         # Canonical Windows IDs, not the local aliases being synchronized above.
@@ -41,6 +70,13 @@ function Get-FolderMap {
         foreach ($name in @($map.Keys)) { $map[$name] = $paths[$map[$name]] }
     }
     return $map
+}
+
+function Get-ICloudFolderDefinitions {
+    $map=Get-FolderMap -IncludeMusic
+    foreach($relative in @($map.Values | Select-Object -Unique)){
+        [pscustomobject]@{Id=$(if($relative -eq 'Videos\Captures'){'Captures'}else{$relative});RelativePath=$relative}
+    }
 }
 
 function Get-UserSid { [Security.Principal.WindowsIdentity]::GetCurrent().User.Value }
@@ -97,13 +133,14 @@ function Get-ResolvedFolderPath {
 
 function Test-ICloudFolderSetup {
     [CmdletBinding()]
-    param([string]$ICloudRoot = "$env:USERPROFILE\iCloudDrive", [switch]$IncludeMusic)
+    param([string]$ICloudRoot = "$env:USERPROFILE\iCloudDrive", [switch]$IncludeMusic, [hashtable]$FolderPaths=@{})
     $root = Get-NormalPath $ICloudRoot
     $map = Get-FolderMap -IncludeMusic:$IncludeMusic
+    $targets=Get-FolderMap -IncludeMusic:$IncludeMusic -Root $root -FolderPaths $FolderPaths
     $registered = @(Get-RegisteredICloudRoots)
     $errors = @()
     $rows = foreach ($name in $map.Keys) {
-        $expected = Join-Path $root $map[$name]
+        $expected = $targets[$name]
         $value = $null
         try { $value = Read-FolderValue $name } catch { $errors += $_.Exception.Message }
         $current = if ($value -and $value.Exists) { [Environment]::ExpandEnvironmentVariables($value.Data) } else { $null }
@@ -116,7 +153,8 @@ function Test-ICloudFolderSetup {
     $resolved = foreach ($folder in @($map.Values | Select-Object -Unique)) {
         $path = $null
         try { $path = Get-ResolvedFolderPath $folder } catch { $errors += $_.Exception.Message }
-        $expected = Join-Path $root $folder
+        $name=@($map.Keys | Where-Object {$map[$_] -eq $folder})[0]
+        $expected = $targets[$name]
         [pscustomobject]@{ Folder=$folder; Current=$path; Expected=$expected; Matches=($null -ne $path -and $path -ieq $expected) }
     }
     $rootExists = Test-Path -LiteralPath $root -PathType Container
@@ -250,8 +288,9 @@ function Invoke-ICloudFolders {
     param(
         [string]$ICloudRoot = "$env:USERPROFILE\iCloudDrive",
         [switch]$Apply, [switch]$VerifiedSyncRoot, [switch]$IncludeMusic,
-        [switch]$AllowExistingContent, [string]$RestoreBackup, [switch]$ResetToDefaults
+        [switch]$AllowExistingContent, [string]$RestoreBackup, [switch]$ResetToDefaults, [hashtable]$FolderPaths=@{}
     )
+    if($FolderPaths.Count -and ($ResetToDefaults -or $RestoreBackup)){throw 'Custom folder paths cannot be combined with reset or backup restore.'}
     if ($ResetToDefaults -and ($RestoreBackup -or $PSBoundParameters.ContainsKey('ICloudRoot') -or $VerifiedSyncRoot -or $IncludeMusic)) {
         throw 'ResetToDefaults cannot be combined with RestoreBackup, ICloudRoot, VerifiedSyncRoot or IncludeMusic. Reset includes every managed folder, including Music.'
     }
@@ -284,12 +323,12 @@ function Invoke-ICloudFolders {
                 $root = Get-NormalPath $ICloudRoot
                 if (-not (Test-Path -LiteralPath $root -PathType Container)) { throw "iCloud root must already exist: $root" }
                 $registeredRoots = @(Get-RegisteredICloudRoots)
-                $map = Get-FolderMap -IncludeMusic:$IncludeMusic
+                $map = Get-FolderMap -IncludeMusic:$IncludeMusic -Root $root -FolderPaths $FolderPaths
             }
             foreach ($name in $map.Keys) {
                 $old = Read-FolderValue $name
                 $before += $old
-                $target = if ($ResetToDefaults) { $map[$name] } else { Join-Path $root $map[$name] }
+                $target = $map[$name]
                 $destinations += $target
                 $desired += [pscustomobject]@{ Name=$name; Exists=$true; Kind='ExpandString'; Data=$target }
                 if ($old.Exists) {
@@ -374,4 +413,4 @@ function Invoke-ICloudFolders {
     }
 }
 
-Export-ModuleMember -Function Invoke-ICloudFolders, Test-ICloudFolderSetup
+Export-ModuleMember -Function Invoke-ICloudFolders, Test-ICloudFolderSetup, Get-ICloudFolderDefinitions

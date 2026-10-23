@@ -99,6 +99,16 @@ public static class ICloudPickerDriver
             Open("BrowseRoot","Choose your iCloud Drive folder");Choose(chosen);
             Wait(()=>Value("CloudRoot")==chosen,"Folder selection lost its Unicode path");
             Console.WriteLine("PASS: owned folder picker cancellation and Unicode selection");
+            ((TogglePattern)Id(window,"CustomizePaths").GetCurrentPattern(TogglePattern.Pattern)).Toggle();
+            original=Value("Destination_Documents");
+            Open("BrowseDestination_Documents","Choose Documents destination");Cancel();
+            Assert(Value("Destination_Documents")==original,"Cancelled custom destination picker changed its path");
+            string custom=Path.Combine(chosen,"Personal \u00e9");Directory.CreateDirectory(custom);
+            Open("BrowseDestination_Documents","Choose Documents destination");Choose(custom);
+            Wait(()=>Value("Destination_Documents")==custom,"Custom destination selection lost its path");
+            Assert(!Id(window,"Apply").Current.IsEnabled,"Custom destination picker granted unreviewed approval");
+            ((TogglePattern)Id(window,"CustomizePaths").GetCurrentPattern(TogglePattern.Pattern)).Toggle();
+            Console.WriteLine("PASS: per-folder destination picker cancellation, Unicode selection and fresh-preview gating");
             ((ExpandCollapsePattern)Id(window,"ActionChoice").GetCurrentPattern(ExpandCollapsePattern.Pattern)).Expand();
             Wait(()=>Name("Restore a recovery backup")!=null,"Restore action unavailable");
             ((SelectionItemPattern)Name("Restore a recovery backup").GetCurrentPattern(SelectionItemPattern.Pattern)).Select();

@@ -4,11 +4,14 @@ if(& (Join-Path $PSScriptRoot 'Enter-TestDesktop.ps1') -ScriptPath $PSCommandPat
 $repo=Split-Path $PSScriptRoot -Parent
 $exe=Join-Path $repo 'ui/ICloudFolderSetup/bin/x64/Debug/net10.0-windows10.0.19041.0/win-x64/ICloudFolderSetup.exe'
 if(-not(Test-Path -LiteralPath $exe)){throw 'Build the native Debug x64 project first.'}
-$image=Join-Path $repo '.local/hidden-desktop/winui-keyboard.png'
+foreach($custom in @($false,$true)){
+$suffix=if($custom){'-custom'}else{''}
+$image=Join-Path $repo ('.local/hidden-desktop/winui-keyboard'+$suffix+'.png')
 foreach($file in @($image,($image+'.json'))){if(Test-Path -LiteralPath $file){Remove-Item -LiteralPath $file}}
 $start=New-Object Diagnostics.ProcessStartInfo
 $start.FileName=$exe;$start.UseShellExecute=$false
 $start.Arguments='--source "'+$repo+'" --render-fixture "'+$image+'" --fixture-keyboard'
+if($custom){$start.Arguments+=' --fixture-custom-paths'}
 $process=[Diagnostics.Process]::Start($start)
 try{
     $until=[DateTime]::UtcNow.AddSeconds(35)
@@ -32,7 +35,14 @@ try{
         KeepFiles=@('Change locations without copying existing files','CheckBox');
         Results=@('Plan and results','Edit');Technical=@('Technical details','CheckBox');
         Preview=@('Preview','Button');DryRun=@('Dry run','Button')
+        CustomizePaths=@('Customize each folder (advanced)','CheckBox')
     }
+    if($custom){foreach($folder in @('Desktop','Documents','Pictures','Videos','Downloads','Captures')){
+        $expected['Destination_'+$folder]=@(($folder+' destination'),'Edit')
+        $expected['BrowseDestination_'+$folder]=@(('Browse for '+$folder+' destination'),'Button')
+    }}
+    if(@($report.Keyboard|Where-Object {$_.Id -in @('Destination_Music','BrowseDestination_Music')}).Count){throw 'Unchecked Music destination is keyboard-enabled.'}
+    if(-not $custom -and @($report.Keyboard|Where-Object {$_.Id -like 'Destination_*' -or $_.Id -like 'BrowseDestination_*'}).Count){throw 'Default destinations expose editable tab stops.'}
     foreach($id in $expected.Keys){
         $nodes=@($report.Keyboard | Where-Object {$_.Element -eq $id -or $_.Id -eq $id})
         if($nodes.Count -ne 1){throw ('Expected one reachable tab stop: '+$id)}
@@ -47,3 +57,4 @@ try{
     if(($report.Keyboard|Where-Object Element -eq 'KeepFiles').Help -notlike '*files stay where they are*'){throw 'Existing-content accessibility help omits retained originals.'}
     'PASS: native forward/reverse focus navigation, reachable named controls, logical reverse order and skipped disabled Apply'
 }finally{if(-not $process.HasExited){$process.Kill();$process.WaitForExit(5000)|Out-Null};$process.Dispose()}
+}

@@ -2,6 +2,7 @@
 
 ## v2.4.0
 
+- Shows proposed folder destinations and icons by default. Advanced mode adds per-folder path editing and browsing within iCloud Drive, with shared setup/copy/check validation and fresh-preview gating.
 - Gives backup account/schema mismatches recovery-file guidance and verifies cancelled/confirmed cloud actions against isolated native UI fixtures.
 
 - Reads the native executable version from VERSION and verifies it in extracted packages. Handles BOM-prefixed release policies and single-file legacy policies consistently in Windows PowerShell and PowerShell 7.

@@ -48,10 +48,11 @@ function Get-CopyHash {
     (Get-FileHash -LiteralPath $Path -Algorithm SHA256 -ErrorAction Stop).Hash
 }
 function Get-CopyPairs {
-    param([string]$ICloudRoot,[switch]$ResetToDefaults,[switch]$IncludeMusic,[switch]$VerifiedSyncRoot,[switch]$ForApply)
+    param([string]$ICloudRoot,[switch]$ResetToDefaults,[switch]$IncludeMusic,[switch]$VerifiedSyncRoot,[switch]$ForApply,[hashtable]$FolderPaths=@{})
     $core=Import-Module (Join-Path $PSScriptRoot 'ICloudFolders.psm1') -Force -PassThru
     & $core {
-        param($Root,$Reset,$Music,$Verified,$Applying)
+        param($Root,$Reset,$Music,$Verified,$Applying,$CustomPaths)
+        if($Reset -and $CustomPaths.Count){throw 'Custom folder paths cannot replace Windows defaults.'}
         if($Reset){$map=Get-FolderMap -IncludeMusic -SystemDefaults}
         else{
             $Root=Get-NormalPath $Root
@@ -59,19 +60,19 @@ function Get-CopyPairs {
             $registered=@(Get-RegisteredICloudRoots)
             if($registered.Count -gt 0 -and $registered -notcontains $Root){throw 'The selected folder does not match your registered iCloud Drive location.'}
             if($Applying -and $registered.Count -eq 0 -and -not $Verified){throw 'Windows has no iCloud registration. Verify the active folder in iCloud settings before copying.'}
-            $map=Get-FolderMap -IncludeMusic:$Music
+            $map=Get-FolderMap -IncludeMusic:$Music -Root $Root -FolderPaths $CustomPaths
         }
         $seen=@{}
         foreach($name in $map.Keys){
             $value=Read-FolderValue $name
             if(-not $value.Exists){continue}
             $source=Get-NormalPath $value.Data
-            $target=if($Reset){$map[$name]}else{Join-Path $Root $map[$name]}
+            $target=$map[$name]
             if($source -ieq $target){continue}
             $key=$source+'|'+$target
             if(-not $seen.ContainsKey($key)){$seen[$key]=$true;[pscustomobject]@{Source=$source;Destination=$target}}
         }
-    } $ICloudRoot ([bool]$ResetToDefaults) ([bool]$IncludeMusic) ([bool]$VerifiedSyncRoot) ([bool]$ForApply)
+    } $ICloudRoot ([bool]$ResetToDefaults) ([bool]$IncludeMusic) ([bool]$VerifiedSyncRoot) ([bool]$ForApply) $FolderPaths
 }
 function Test-CopyCancellation {
     if($script:CopyCancelHandle -and $script:CopyCancelHandle.WaitOne(0)){
@@ -134,7 +135,7 @@ function Get-CopyPlan {
 }
 function Invoke-ICloudFolderCopy {
     [CmdletBinding(SupportsShouldProcess)]
-    param([string]$ICloudRoot="$env:USERPROFILE\iCloudDrive",[switch]$ResetToDefaults,[switch]$IncludeMusic,[switch]$VerifiedSyncRoot,[switch]$Apply,[string]$CancelEventName,[switch]$ProgressEvents)
+    param([string]$ICloudRoot="$env:USERPROFILE\iCloudDrive",[switch]$ResetToDefaults,[switch]$IncludeMusic,[switch]$VerifiedSyncRoot,[switch]$Apply,[string]$CancelEventName,[switch]$ProgressEvents,[hashtable]$FolderPaths=@{})
     $mutex=New-Object Threading.Mutex($false,('Local\ICloudFolders-'+[Security.Principal.WindowsIdentity]::GetCurrent().User.Value))
     $locked=$false
     $script:CopyCancelHandle=$null;$script:CopyProgressEnabled=[bool]$ProgressEvents
@@ -145,7 +146,7 @@ function Invoke-ICloudFolderCopy {
         }
         try{$locked=$mutex.WaitOne(0)}catch [Threading.AbandonedMutexException]{$locked=$true}
         if(-not $locked){throw 'Another folder operation is running for this account.'}
-        $pairs=@(Get-CopyPairs -ICloudRoot $ICloudRoot -ResetToDefaults:$ResetToDefaults -IncludeMusic:$IncludeMusic -VerifiedSyncRoot:$VerifiedSyncRoot -ForApply:$Apply)
+        $pairs=@(Get-CopyPairs -ICloudRoot $ICloudRoot -ResetToDefaults:$ResetToDefaults -IncludeMusic:$IncludeMusic -VerifiedSyncRoot:$VerifiedSyncRoot -ForApply:$Apply -FolderPaths $FolderPaths)
         $plan=@(Get-CopyPlan $pairs)
         $plan | Select-Object Action,Source,Destination | Format-List | Out-Host
         Write-Host 'Copy only: originals stay in place. Folder settings are not changed. Reading cloud files may download their contents.'

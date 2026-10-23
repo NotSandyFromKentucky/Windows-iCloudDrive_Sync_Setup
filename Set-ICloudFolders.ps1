@@ -7,13 +7,14 @@ param(
     [switch]$IncludeMusic,
     [switch]$AllowExistingContent,
     [string]$RestoreBackup,
-    [switch]$ResetToDefaults
+    [switch]$ResetToDefaults,
+    [hashtable]$FolderPaths=@{}
 )
 $ErrorActionPreference = 'Stop'
 try {
     Import-Module (Join-Path $PSScriptRoot 'ICloudFolders.psm1') -Force
     $options = @{
-        Apply = $Apply; AllowExistingContent = $AllowExistingContent
+        Apply = $Apply; AllowExistingContent = $AllowExistingContent; FolderPaths=$FolderPaths
     }
     foreach ($name in @('ICloudRoot','VerifiedSyncRoot','IncludeMusic','ResetToDefaults')) {
         if ($PSBoundParameters.ContainsKey($name)) { $options[$name] = $PSBoundParameters[$name] }

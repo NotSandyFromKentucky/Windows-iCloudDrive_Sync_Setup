@@ -40,10 +40,11 @@ function Select-NavigationId([string]$Id){
 }
 try{
     Copy-Item -LiteralPath (Join-Path $repo 'ICloudFolderSetup.UI.psm1') -Destination $fixture
+    Copy-Item -LiteralPath (Join-Path $repo 'ICloudFolders.psm1') -Destination $fixture
     Copy-Item -LiteralPath (Join-Path $repo 'tools/Invoke-WinUIBridge.ps1') -Destination (Join-Path $fixture 'tools')
     @'
 [CmdletBinding(SupportsShouldProcess)]
-param([string]$ICloudRoot,[switch]$IncludeMusic,[switch]$Apply,[switch]$VerifiedSyncRoot,[switch]$AllowExistingContent,[switch]$ResetToDefaults,[string]$RestoreBackup)
+param([string]$ICloudRoot,[switch]$IncludeMusic,[switch]$Apply,[switch]$VerifiedSyncRoot,[switch]$AllowExistingContent,[switch]$ResetToDefaults,[string]$RestoreBackup,[hashtable]$FolderPaths=@{})
 if($ICloudRoot -eq 'FAIL'){[Console]::Error.WriteLine('Access is denied to the fixture folder.');exit 1}
 switch($ICloudRoot){
     'BACKUP-FAIL' {[Console]::Error.WriteLine('The backup SID does not match this account.');exit 1}
@@ -51,7 +52,9 @@ switch($ICloudRoot){
     'ROLLBACK-FAIL' {[Console]::Error.WriteLine('ROLLBACK INCOMPLETE: retain fixture-before.json.');exit 1}
     'SOURCE-CONTENT' {[Console]::Error.WriteLine('Existing source content requires review.');exit 1}
 }
-[pscustomobject]@{Root=$ICloudRoot;Apply=[bool]$Apply;DryRun=[bool]$WhatIfPreference;Reset=[bool]$ResetToDefaults;Backup=$RestoreBackup} | ConvertTo-Json -Compress
+$payload=[ordered]@{Root=$ICloudRoot;Apply=[bool]$Apply;DryRun=[bool]$WhatIfPreference;Reset=[bool]$ResetToDefaults;Backup=$RestoreBackup}
+if($FolderPaths.Count){$payload.Paths=$FolderPaths}
+[pscustomobject]$payload | ConvertTo-Json -Compress -Depth 4
 Write-Host 'Recovery backup: fixture-before.json'
 if($Apply -and -not $WhatIfPreference){[IO.File]::WriteAllText((Join-Path $PSScriptRoot 'applied.txt'),'fixture only')}
 exit 0
@@ -96,6 +99,22 @@ exit 0
     Wait-For {$preview.Current.IsEnabled} 'Apply did not finish'
     Wait-For {$preview.Current.HasKeyboardFocus} 'Confirmed action did not restore keyboard focus to Preview'
     Assert (-not $apply.Current.IsEnabled) 'Apply can repeat without a fresh preview'
+    $customize=Find-Control 'CustomizePaths'
+    Assert ($customize.GetCurrentPattern([Windows.Automation.TogglePattern]::Pattern).Current.ToggleState -eq [Windows.Automation.ToggleState]::Off) 'Default mode unexpectedly customizes folder paths'
+    foreach($id in @('Desktop','Documents','Pictures','Videos','Downloads','Captures','Music')){Assert ($null -ne (Find-Control ('DefaultDestination_'+$id))) ('Default destination missing: '+$id)}
+    $customize.GetCurrentPattern([Windows.Automation.TogglePattern]::Pattern).Toggle()
+    $customPath=$tricky+'\Personal '+[char]0x00E9
+    (Find-Control 'Destination_Documents').GetCurrentPattern([Windows.Automation.ValuePattern]::Pattern).SetValue($customPath)
+    Assert (-not $apply.Current.IsEnabled) 'Custom path edit retained approval'
+    Invoke-Control $preview
+    Wait-For {$apply.Current.IsEnabled} 'Custom path preview did not finish'
+    $text=$results.GetCurrentPattern([Windows.Automation.ValuePattern]::Pattern).Current.Value
+    $line=@($text -split '[\r\n]+'|Where-Object {$_ -like '{"Root"*'})[0]
+    $payload=$line|ConvertFrom-Json
+    Assert ($payload.Paths.Documents -ceq $customPath -and -not $payload.Paths.PSObject.Properties['Music']) 'Custom Unicode path or optional-Music scope was lost'
+    $customize.GetCurrentPattern([Windows.Automation.TogglePattern]::Pattern).Toggle()
+    Assert (-not $apply.Current.IsEnabled) 'Returning to default paths retained custom approval'
+    'PASS: default destination rows, opt-in advanced Unicode paths and preview invalidation'
     $root.GetCurrentPattern([Windows.Automation.ValuePattern]::Pattern).SetValue('FAIL')
     Invoke-Control $preview
     Wait-For {$preview.Current.IsEnabled} 'Failed preview did not complete'

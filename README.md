@@ -34,6 +34,8 @@ Choose an action and its options, then click **Preview / Check** or **Dry run**.
 | Check iCloud configuration | Check registration, paths and folder resolution. JSON output and saving the displayed result are optional. |
 | Create / check / clean up cloud test | Create a harmless file, check a remotely renamed return, or preview and confirm its removal. Instructions appear in the window. |
 
+For iCloud setup, the default view shows each folder's icon and proposed path immediately. **Customize each folder (advanced)** enables a textbox and **Browse** button for each destination. Custom destinations stay inside the selected iCloud Drive folder. Music remains optional. Returning to default paths or changing any destination requires a fresh preview; no files are moved. The same destinations are used by iCloud copy and configuration checks. Windows-default reset and backup restore retain their own destinations.
+
 **Recovery files**, **Help**, and **Install for me** are available in the same window. The setup/reset acknowledgement **Change locations without copying files** permits changing locations while leaving content where it is; it never triggers copying.
 
 For direct Explorer access, **Reset-WindowsFolderDefaults.cmd** opens reset mode and **Check-ICloudFolderSetup.cmd** opens diagnostics. All settings and safety checks are shared with the [command-line interface](docs/CLI.md).

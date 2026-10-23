@@ -18,6 +18,7 @@ function Focused($Control){foreach($child in $Control.Controls){if($child.Focuse
 try{
     foreach($case in @(
         @{Text='Different file already exists; nothing will be overwritten';Expected='*files conflict*'},
+        @{Text='Folder destinations must be different: Desktop and Documents';Expected='*separate locations inside the selected iCloud Drive folder*'},
         @{Text='ROLLBACK INCOMPLETE';Expected='*Recovery needs attention*'},
         @{Text='Existing source content requires review';Expected='*Copy them using a separate copy action*'},
         @{Text='Access is denied';Expected='*check folder permissions*'},

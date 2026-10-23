@@ -1,10 +1,10 @@
 #requires -Version 5.1
 [CmdletBinding()]
-param([string]$ICloudRoot = "$env:USERPROFILE\iCloudDrive", [switch]$IncludeMusic, [switch]$Json)
+param([string]$ICloudRoot = "$env:USERPROFILE\iCloudDrive", [switch]$IncludeMusic, [switch]$Json, [hashtable]$FolderPaths=@{})
 $ErrorActionPreference = 'Stop'
 try {
     Import-Module (Join-Path $PSScriptRoot 'ICloudFolders.psm1') -Force
-    $report = Test-ICloudFolderSetup -ICloudRoot $ICloudRoot -IncludeMusic:$IncludeMusic
+    $report = Test-ICloudFolderSetup -ICloudRoot $ICloudRoot -IncludeMusic:$IncludeMusic -FolderPaths $FolderPaths
     if ($Json) { $report | ConvertTo-Json -Depth 8 } else {
         Write-Host "iCloud folder check: $($report.Root)"
         Write-Host "Root exists: $($report.RootExists); registered for this account: $($report.RootRegistered)"

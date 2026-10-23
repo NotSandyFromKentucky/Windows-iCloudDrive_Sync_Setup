@@ -281,6 +281,38 @@ try {
     Invoke-ICloudFolders -RestoreBackup $resetBackup -Apply
     Assert (& $module { $script:Fake.Count -eq 2 -and $script:Fake.Desktop.Kind -ceq 'String' -and $script:Fake.Desktop.Data -ceq $args[0] } $source) 'Reset backup failed to restore exact original state'
     Pass 'reset backup reverses the reset including originally absent Music aliases'
+    $definitions=@(Get-ICloudFolderDefinitions)
+    Assert ($definitions.Count -eq 7 -and ($definitions|Where-Object Id -eq 'Captures').RelativePath -ceq 'Videos\Captures') 'Folder definitions differ from the central map'
+    & $module {
+        param($Workspace,$Original)
+        $script:RegisteredRoots=@();$script:WriteCount=0;$script:FailAt=0
+        function script:Get-RegisteredICloudRoots {$script:RegisteredRoots}
+        $script:Fake=@{Desktop=[pscustomobject]@{Name='Desktop';Exists=$true;Kind='String';Data=$Original};Unrelated=[pscustomobject]@{Name='Unrelated';Exists=$true;Kind='String';Data='untouched'}}
+        $script:CustomRecovery=Join-Path $Workspace 'custom-recovery'
+        function script:Get-RecoveryRoot {$script:CustomRecovery}
+    } $testRoot $source
+    $customDocuments=Join-Path $cloud ("Personal files ' & "+[char]0x00E9)
+    $paths=@{Documents=$customDocuments}
+    Invoke-ICloudFolders -ICloudRoot $cloud -FolderPaths $paths
+    Invoke-ICloudFolders -ICloudRoot $cloud -FolderPaths $paths -Apply -VerifiedSyncRoot -AllowExistingContent -WhatIf
+    Assert ((& $module {$script:WriteCount}) -eq 0 -and -not(Test-Path $customDocuments)) 'Custom preview/WhatIf wrote settings or created paths'
+    foreach($invalid in @(@{OneDrive=(Join-Path $cloud 'Other')},@{Documents=$testRoot},@{Documents='relative'},@{Documents=''},@{Documents=(Join-Path $cloud 'Desktop')},@{Desktop=(Join-Path $cloud 'Documents\Nested')},@{Music=(Join-Path $cloud 'Songs')})){
+        $rejected=$false;try{Invoke-ICloudFolders -ICloudRoot $cloud -FolderPaths $invalid}catch{$rejected=$true};Assert $rejected 'Invalid custom folder plan was accepted'
+    }
+    Expect-Failure {Invoke-ICloudFolders -ResetToDefaults -FolderPaths $paths} 'cannot be combined'
+    Expect-Failure {Invoke-ICloudFolders -RestoreBackup $resetBackup -FolderPaths $paths} 'cannot be combined'
+    Assert ((& $module {$script:WriteCount}) -eq 0) 'Rejected custom paths wrote registry'
+    Pass 'central folder definitions, custom preview/WhatIf, scope/overlap validation and reset/restore exclusion'
+    & $module {$script:FailAt=3}
+    Expect-Failure {Invoke-ICloudFolders -ICloudRoot $cloud -FolderPaths $paths -Apply -VerifiedSyncRoot -AllowExistingContent} 'Original settings retained/restored'
+    Assert (& $module {$script:Fake.Count -eq 2 -and $script:Fake.Desktop.Kind -ceq 'String' -and -not $script:Fake.ContainsKey('Personal')}) 'Custom failure lost exact state or introduced absent values'
+    & $module {$script:FailAt=0;$script:WriteCount=0}
+    Invoke-ICloudFolders -ICloudRoot $cloud -FolderPaths $paths -Apply -VerifiedSyncRoot -AllowExistingContent
+    Assert (& $module {param($Expected) $script:Fake.Personal.Data -ceq $Expected -and $script:Fake['{F42EE2D3-909F-4907-8871-4C22FC0BF756}'].Data -ceq $Expected -and $script:Fake.Unrelated.Data -ceq 'untouched'} $customDocuments) 'Custom paths lost aliases or changed unrelated settings'
+    $customBackup=@(Get-ChildItem (Join-Path $testRoot 'custom-recovery') -Recurse -Filter before.json)[0].FullName
+    Invoke-ICloudFolders -RestoreBackup $customBackup -Apply
+    Assert (& $module {$script:Fake.Count -eq 2 -and $script:Fake.Desktop.Kind -ceq 'String' -and -not $script:Fake.ContainsKey('Personal')}) 'Custom backup failed exact restoration'
+    Pass 'custom destinations share aliases, retain originals and preserve exact rollback/backup restoration'
     Write-Host "$script:passed tests passed. No user-shell registry values were written."
 } finally {
     Remove-Module $module -Force
