@@ -32,6 +32,7 @@ function Test-Launcher([string]$Source,[string]$Mode){
             $script:cancelButton.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
         }else{
             Wait-For {$null -ne (Find-Control $window 'ActionChoice')} 'Packaged native controls unavailable'
+            Wait-For {$preview=Find-Control $window 'Preview';$null -ne $preview -and $preview.Current.IsEnabled} 'Packaged native initialization did not finish'
             $selection=(Find-Control $window 'ActionChoice').GetCurrentPattern([Windows.Automation.SelectionPattern]::Pattern)
             $choice=$selection.Current.GetSelection()[0].Current.Name
             $expectedAction=switch($Mode){Reset{'Reset to Windows defaults'} Check{'Check iCloud configuration'} default{'Set up iCloud folders'}}

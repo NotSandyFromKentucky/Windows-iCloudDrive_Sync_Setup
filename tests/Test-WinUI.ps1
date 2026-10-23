@@ -45,7 +45,7 @@ try{
     # Delay only the read-only metadata fixture to prove the window renders
     # while startup work is pending and cannot execute an incomplete plan.
     $bridgePath=Join-Path $fixture 'tools/Invoke-WinUIBridge.ps1'
-    $delay="if(`$request.Action -eq 'Get folder definitions'){ `$deadline=[DateTime]::UtcNow.AddSeconds(35); while(-not (Test-Path (Join-Path `$root 'release-metadata'))){if([DateTime]::UtcNow -gt `$deadline){throw 'Metadata fixture timed out'};Start-Sleep -Milliseconds 100};"
+    $delay="if(`$request.Action -eq 'Get folder definitions'){ [IO.File]::WriteAllText((Join-Path `$root 'metadata-worker'),[string]`$PID); `$deadline=[DateTime]::UtcNow.AddSeconds(35); while(-not (Test-Path (Join-Path `$root 'release-metadata'))){if([DateTime]::UtcNow -gt `$deadline){throw 'Metadata fixture timed out'};Start-Sleep -Milliseconds 100};"
     $bridgeText=[IO.File]::ReadAllText($bridgePath).Replace("if(`$request.Action -eq 'Get folder definitions'){",$delay)
     [IO.File]::WriteAllText($bridgePath,$bridgeText)
     @'
@@ -240,6 +240,26 @@ Write-Output 'Installed application: isolated fixture'
     Wait-For {$preview.Current.IsEnabled -and (Test-Path (Join-Path $fixture 'install-fixture.txt'))} 'Confirmed native installation did not reach its stub backend'
     Assert ($status.Current.Name -like '*Installation completed*') 'Native install result was not reported'
     'PASS: native installation dialog, cancel default path, confirmed fixture backend and installation result'
+    [ICloudTestDesktop]::CloseWindow([ICloudTestDesktop]::FindWindowForProcess($process.Id,'iCloud folder setup'))
+    Assert ($process.WaitForExit(10000)) 'Ready window did not close'
+    $process.Dispose()
+    Remove-Item -LiteralPath (Join-Path $fixture 'release-metadata')
+    Remove-Item -LiteralPath (Join-Path $fixture 'metadata-worker')
+    $start.Arguments='--source "'+$fixture+'"'
+    $process=[Diagnostics.Process]::Start($start)
+    Wait-For {[ICloudTestDesktop]::FindWindowForProcess($process.Id,'iCloud folder setup') -ne [IntPtr]::Zero} 'Startup close fixture did not open'
+    $handle=[ICloudTestDesktop]::FindWindowForProcess($process.Id,'iCloud folder setup')
+    $window=[Windows.Automation.AutomationElement]::FromHandle($handle)
+    Wait-For {$null -ne (Find-Control 'Preview')} 'Startup controls unavailable'
+    Assert (-not (Find-Control 'Preview').Current.IsEnabled) 'Startup close fixture was not waiting for metadata'
+    Wait-For {Test-Path (Join-Path $fixture 'metadata-worker')} 'Metadata worker did not enter fixture gate'
+    $metadataWorker=Get-Process -Id ([int][IO.File]::ReadAllText((Join-Path $fixture 'metadata-worker')))
+    [ICloudTestDesktop]::CloseWindow($handle)
+    Assert ($process.WaitForExit(10000) -and $process.ExitCode -eq 0) 'Read-only startup prevented closing'
+    [IO.File]::WriteAllText((Join-Path $fixture 'release-metadata'),'continue')
+    Assert ($metadataWorker.WaitForExit(10000)) 'Read-only metadata worker did not finish'
+    $metadataWorker.Dispose()
+    'PASS: read-only startup can close while metadata is pending'
 }catch{
     Write-Output $_.ScriptStackTrace
     if($window){

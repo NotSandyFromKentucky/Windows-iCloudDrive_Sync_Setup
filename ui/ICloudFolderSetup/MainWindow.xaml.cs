@@ -10,6 +10,8 @@ namespace ICloudFolderSetup;
 public sealed partial class MainWindow : Window
 {
     private bool ready, busy, stopRequested, confirming;
+    private bool initializing=true;
+    internal bool IsClosed {get;private set;}
     private SetupOptions? reviewed;
     private string currentCategory="Locations";
     private string friendly="Your reviewed plan will appear here.", raw="";
@@ -34,8 +36,9 @@ public sealed partial class MainWindow : Window
         if(mode=="Check") ShowCategory("Check");
         SetBusy(true,Snapshot());
         SetStatus("Loading folder destinations","Preparing your folder choices. No settings are being changed.");
+        Closed+=(_,_)=>IsClosed=true;
         AppWindow.Closing+=(_,args)=> {
-            if(!busy) return;
+            if(!busy || initializing) return;
             args.Cancel=true;
             SetStatus("Operation still running","Wait for its result before closing. Copies can stop after the current file; folder changes must finish.",InfoBarSeverity.Warning);
         };
@@ -43,16 +46,20 @@ public sealed partial class MainWindow : Window
     internal async Task InitializeAsync()
     {
         try{
-            InitializeFolderRows(await backend.ReadFolderDefinitionsAsync());
+            var definitions=await backend.ReadFolderDefinitionsAsync();
+            if(IsClosed)return;
+            InitializeFolderRows(definitions);
+            initializing=false;
             SetBusy(false,Snapshot());
             InvalidateReview();
             if(Argument("--mode")=="Install")await InstallAsync();
         }catch(Exception error){
+            if(IsClosed)return;
             // Keep actions unavailable when the authoritative folder map cannot load,
             // but permit closing the window and reading the actionable error.
             busy=false;Progress.Visibility=Visibility.Collapsed;
             ShowError(error);
-        }
+        }finally{initializing=false;}
     }
     private string? Argument(string key)
     {
