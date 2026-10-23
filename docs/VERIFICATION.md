@@ -89,11 +89,13 @@ It requires a code-signing EKU and private key, uses SHA-256 and an Authenticode
 
 `VERSION` and `build/ReleaseFiles.json` define the version and runtime allowlist. `tools/New-ReleasePackage.ps1` packages an exact Git commit, adds per-file hashes and signature state, and writes an archive checksum. `tools/Test-ReleasePackage.ps1` verifies contents, manifest, syntax and signatures when declared.
 
-The unsigned builder fixes entry order and ZIP timestamps to the source commit, enabling byte-identical retries on the same runtime. Signed timestamped builds need not be identical. Verification checks ZIP paths and the script-only size limit before extraction. Publication additionally requires the manifest's commit and version to match the checked-out version tag. A draft with different already-uploaded bytes is retained for inspection rather than overwritten.
+The unsigned builder fixes entry order and ZIP timestamps to the source commit, enabling byte-identical retries on the same runtime. Signed timestamped builds need not be identical. Verification checks ZIP paths and the source policy's size limits before extraction. Publication additionally requires the manifest's commit and version to match the checked-out version tag. A draft with different already-uploaded bytes is retained for inspection rather than overwritten.
 
 A version-tag push runs the full validation workflow before publishing. The release job requires the tag to point to the checked-out commit, creates or resumes a draft, verifies uploaded bytes by downloading them, then publishes. It refuses to overwrite a published version. The legacy `Release` and `v2.0.0` remain unchanged. The workflow has read-only permissions by default; only the publication job has contents-write access.
 
 ## Remaining external gates
+
+The unreleased native x64 package passed local checksum, complete-file manifest, syntax, PE architecture and dependency-target checks on 2026-10-23. Two builds from the same immutable source produced identical unsigned bytes. Rejection tests passed for changed checksums, unsafe ZIP paths and unavailable signing certificates. The updated verifier also accepted the published legacy v2.3.1 archive. On a verified hidden desktop, all four extracted entry modes started the Release app, and a complete fixture installation launched its installed checker. Hosted CI, ARM64 runtime, Narrator speech and physical DPI transitions remain unverified. See [native migration evidence and remaining gates](WINUI.md).
 
 - Repeat the documented remote round trip on each new installation or when diagnosing sync problems. The observed pass above applies to the tested account, version and time.
 - Actual trusted signing requires a suitable certificate. Optional signing and rejection of an unavailable certificate are implemented; releases are explicitly unsigned until such a certificate is supplied.

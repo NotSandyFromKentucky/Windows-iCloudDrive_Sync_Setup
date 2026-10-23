@@ -1,5 +1,6 @@
 #requires -Version 5.1
 $ErrorActionPreference='Stop'
+if(& (Join-Path $PSScriptRoot 'Enter-TestDesktop.ps1') -ScriptPath $PSCommandPath){return}
 $repo=Split-Path $PSScriptRoot -Parent
 if([Threading.Thread]::CurrentThread.ApartmentState -ne 'STA'){
     & powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File $PSCommandPath
@@ -127,7 +128,8 @@ try{
     Assert (-not(Test-Path (Join-Path $fixture 'bad-install'))) 'Invalid source wrote files'
     'PASS: unsafe source manifest rejected before installation'
     $package=Join-Path $fixture 'package-source';$null=[IO.Directory]::CreateDirectory($package)
-    $releaseFiles=@(Get-Content (Join-Path $repo 'build\ReleaseFiles.json') -Raw | ConvertFrom-Json | ForEach-Object {$_})
+    $inputData=Get-Content (Join-Path $repo 'build\ReleaseFiles.json') -Raw | ConvertFrom-Json
+    $releaseFiles=if($inputData -is [array]){@($inputData)}else{@($inputData.Files)}
     $entries=@()
     foreach($file in $releaseFiles){
         $target=Join-Path $package $file;$null=[IO.Directory]::CreateDirectory((Split-Path $target))
@@ -141,9 +143,27 @@ try{
     Expect-Failure {Install-SetupFiles -Source $package -InstallRoot (Join-Path $fixture 'tampered-install') -ProgramsDirectory (Join-Path $fixture 'tampered-menu')}
     Assert (-not(Test-Path (Join-Path $fixture 'tampered-install'))) 'Hash-mismatched source created install directory'
     'PASS: packaged manifest installation and tampered-file rejection before writes'
+    Expect-Failure {Install-SetupFiles -Source $repo -InstallRoot (Join-Path $fixture 'incomplete-native') -ProgramsDirectory (Join-Path $fixture 'native-menu') -RequireNative}
+    Assert (-not(Test-Path (Join-Path $fixture 'incomplete-native'))) 'Incomplete native package created an installation directory'
+    $nativeFiles=@((@($entries.Path)+@('NativeUI/ICloudFolderSetup.exe','tools/Invoke-WinUIBridge.ps1','tools/Invoke-WinUIInstall.ps1')) | Select-Object -Unique)
+    $null=[IO.Directory]::CreateDirectory((Join-Path $package 'NativeUI'))
+    [IO.File]::WriteAllText((Join-Path $package 'NativeUI/ICloudFolderSetup.exe'),'Fixture only; never execute')
+    foreach($bridge in @('Invoke-WinUIBridge.ps1','Invoke-WinUIInstall.ps1')){Copy-Item -LiteralPath (Join-Path $repo ('tools/'+$bridge)) -Destination (Join-Path $package 'tools')}
+    $nativeEntries=@($nativeFiles | ForEach-Object {[pscustomobject]@{Path=$_;SHA256=(Get-FileHash -LiteralPath (Join-Path $package $_)).Hash}})
+    [pscustomobject]@{Files=$nativeEntries} | ConvertTo-Json -Depth 5 | Set-Content (Join-Path $package 'manifest.json')
+    $nativeInstalled=Install-SetupFiles -Source $package -InstallRoot (Join-Path $fixture 'native-installed') -ProgramsDirectory (Join-Path $fixture 'native-menu') -RequireNative
+    $nativeShell=New-Object -ComObject WScript.Shell
+    try{
+        $nativeShortcut=$nativeShell.CreateShortcut($nativeInstalled.Shortcuts[0])
+        try{Assert ($nativeShortcut.TargetPath -ceq (Join-Path $nativeInstalled.Directory 'NativeUI\ICloudFolderSetup.exe') -and $nativeShortcut.Arguments -eq '') 'Native shortcut falls back to the legacy UI'}finally{$null=[Runtime.InteropServices.Marshal]::ReleaseComObject($nativeShortcut)}
+    }finally{$null=[Runtime.InteropServices.Marshal]::ReleaseComObject($nativeShell)}
+    'PASS: native installation requires its complete payload and creates a native executable shortcut without touching user shortcuts'
     'All graphical and installer checks passed without live folder or user shortcut changes.'
+}catch{
+    [Console]::Error.WriteLine(($_ | Out-String))
+    throw
 }finally{
     Remove-Module $ui,$installer -Force
     $path=[IO.Path]::GetFullPath($fixture)
-    if($path.StartsWith([IO.Path]::GetFullPath($repo).TrimEnd('\')+'\.test-gui-',[StringComparison]::OrdinalIgnoreCase)){Remove-Item -LiteralPath $path -Recurse -Force}
+    if($path.StartsWith([IO.Path]::GetFullPath($repo).TrimEnd('\')+'\.test-gui-',[StringComparison]::OrdinalIgnoreCase)){Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction Continue}
 }

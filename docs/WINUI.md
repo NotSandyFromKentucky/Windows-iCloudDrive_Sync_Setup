@@ -1,0 +1,62 @@
+# Native UI migration
+
+## Decision and boundaries
+
+The new interface uses C# and WinUI 3 from the stable Windows App SDK 2.5.1, targeting .NET 10 and an unpackaged, self-contained distribution. This keeps the existing portable-folder and per-user installation model. global.json pins .NET SDK 10.0.402. Package dependencies and both x64/ARM64 runtime targets are pinned in the project and packages.lock.json; ui/NuGet.Config uses the official NuGet feed. No machine-wide runtime or Developer Mode change is required by this deployment model.
+
+The currently published older release still uses Windows Forms. Development Explorer launchers now target the self-contained NativeUI payload; setup/reset/check remain preview-first, and install opens the native Cancel-default confirmation. The migration is not a new published release.
+
+## Review decisions
+
+| Requirement | Implementation | Evidence and remaining work |
+| --- | --- | --- |
+| Standard Windows navigation and controls | NavigationView separates locations, copying, diagnostics and cloud verification. Native file pickers, ContentDialog, InfoBar and ProgressBar replace custom controls. | Real native window starts on a verified hidden desktop. Review all navigation variants, pickers and narrow layouts before switching defaults. |
+| Clear decisions and safe defaults | Action-specific confirmation; Cancel is the default. Apply requires a successful matching preview or dry run. Option edits, failed previews, completed mutations and stopped copies invalidate review. | Native UI Automation exercises preview, cancel, confirmed fixture apply, failure and repeat gating, plus reset WhatIf routing and restore path transport. Cloud create/check/cleanup previews preserve WhatIf and read-only routing. Confirmed cloud mutations remain fixture coverage to expand. |
+| Preserve backend safeguards | tools/Invoke-WinUIBridge.ps1 calls Get-SetupRequest and the existing CLI scripts. Folder maps, exact backups, checked registry writes, ShouldProcess and rollback stay in PowerShell. | Core fake-registry, launcher and diagnostic regressions pass locally. No live developer-account apply/reset/restore is part of validation. |
+| Keep the interface responsive | Async child process and concurrent stdout/stderr draining. Parameters are Base64-encoded JSON data passed through ArgumentList. | Native fixture preserves Unicode, apostrophes and shell metacharacters. Child exit/result consistency is checked. |
+| Actionable errors and useful recovery context | Normal output retains the plan, warnings and recovery paths. Direct Console.Error output is captured before friendly classification. Technical details expose raw output and exit code. | Native fixture verifies access-denied guidance and exact failure context. Review further error classes and technical-output presentation. |
+| Safe copy cancellation | Cooperative named event; current file copy and SHA-256 verification finish before the next boundary. Stop stays enabled while navigation/options are disabled. Closing cannot interrupt an active operation. | Native UI Automation fixture exercises a real copy worker, live progress, safe stopping and retained originals. Live iCloud hydration is not certified by this fixture. |
+| Per-user installation | Native ContentDialog requests explicit installation and optional desktop shortcut. Shared installer requires a complete native payload and produces a native executable shortcut. | Fixture tests cover source rejection and native shortcut paths. The generated Release archive installs into fixture directories and its installed checker launches successfully; native reinstall from the installed runtime preserves the previous payload and exact shortcut backups. |
+| Keyboard and accessibility | Native labels/headers, automation IDs, live-region status, access keys and Cancel-default confirmation. Focus returns to Preview after work completes. | Actual UI Automation on a hidden desktop verifies keyboard focus returns to Preview after a successful preview, confirmed mutation and failed operation. Full keyboard traversal, Narrator speech, high contrast and physical DPI transitions remain explicit checks. |
+| Responsive layout and theme support | Theme resources, Mica backdrop, scrollable content, native text wrapping and system title bar. | Real light/dark layouts and current system-accent variants pass hidden-desktop rendering checks. Narrow/large-text variants and actual high-contrast/DPI transitions need further review. RenderTargetBitmap does not capture the window manager's Mica backdrop. |
+| System accent and restrained identity | Native AccentButtonStyle and selection styling retain the user's Windows accent. A small decorative header combines cloud blue with a theme-adjusted Windows accent. Labels use system text brushes. HighContrast dictionaries replace branding with system window/text colors; colors never convey operation status by themselves. | Test-WinUITheme.ps1 renders light/dark fixtures and compares the actual identity brush against UISettings' current system accent variant. High-contrast dictionary checks do not certify an actual OS contrast-theme transition. |
+
+## Build and test
+
+From the repository root, with the .NET 10 SDK installed:
+
+~~~powershell
+dotnet build .\ui\ICloudFolderSetup\ICloudFolderSetup.csproj -c Debug -p:Platform=x64 -p:RestoreLockedMode=true
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-WinUI.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-WinUITheme.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-WinUILayout.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-WinUIAccessibility.ps1
+dotnet build .\ui\ICloudFolderSetup\ICloudFolderSetup.csproj -c Release -p:Platform=x64 -p:RestoreLockedMode=true
+~~~
+
+Test-WinUI.ps1 automatically uses the verified hidden-desktop runner. Its backend and installation scripts are isolated fixtures. The copy portion uses the real copy module with fixture source/destination pairs. It never applies folder settings or creates shortcuts in the developer's actual Start menu or Desktop. The Debug-only rendering switch is absent from Release builds. Images and logs stay beneath ignored .local/hidden-desktop.
+
+Test-WinUITheme.ps1 changes only the app fixture's requested theme. It checks actual light/dark brush values against Windows UISettings and emits palette reports beside the rendered images; it never changes the user's Windows theme or accent. The high-contrast resource check is structural, with actual OS contrast-theme transitions still unverified. ARM64 Release cross-compilation passes locally; that is not evidence of running the native app on ARM64 hardware.
+
+The configured native-ui CI job builds locked Debug/Release source, runs the native behavior, theme and layout hidden-desktop suites, cross-builds ARM64, and retains fixture evidence. Its hosted execution remains pending until these local changes are committed and pushed.
+
+Test-WinUILayout.ps1 renders the actual native window at 960 x 800, 640 x 720 and 480 x 640 logical pixels on the hidden desktop. Debug-only measurements verify all nine action variants: command buttons stay inside the client area without overlap, read-only actions hide mutation controls, and action-specific path rows remain horizontally contained. All 27 cases pass locally; narrow setup and restore renderings were visually inspected. This does not verify enlarged text or physical monitor transitions. CI includes this suite; hosted execution remains pending.
+
+## Remaining release gates
+
+Test-WinUIHighContrast.ps1 is a disposable-environment-only gate. Assert-IsolatedEnvironment.ps1 runs before UI initialization or any settings API call. Inside the verified hidden desktop it captures Windows high-contrast flags/scheme, enables contrast using SystemParametersInfoW, requires the native app to observe contrast mode, compares both identity colors with Windows window-text color, then restores and reads back the original flags/scheme in finally. It reruns theme rendering after restoration. A hidden desktop alone does not isolate account-wide personalization. Local evidence covers helper compilation, developer-account refusal and unchanged normal-theme regressions; actual contrast toggling is pending the hosted CI gate. See [Microsoft's HIGHCONTRAST contract](https://learn.microsoft.com/en-us/windows/win32/api/winuser/ns-winuser-highcontrastw).
+
+Test-WinUIAccessibility.ps1 exercises native FocusManager forward/reverse tab-order navigation through the setup form, including expanded advanced options. It checks actual automation-peer names/roles, the reverse sequence and exclusion of disabled Apply. The fixture restores the last control before the backward pass because the scoped forward search can hand focus to the host at the boundary. It invokes no actions and sends no physical keyboard input. See [Microsoft's focus-navigation API](https://learn.microsoft.com/en-us/windows/windows-app-sdk/api/winrt/microsoft.ui.xaml.input.focusmanager.trymovefocus). This does not verify navigation-menu arrow keys, access-key activation, spoken Narrator output or real key delivery. Theme/layout report cleanup explicitly removes the JSON sidecar before every run so an older report cannot satisfy a new test.
+
+- Extend responsive coverage to enlarged text, file pickers and error states. All nine action variants pass command/path layout measurements at three widths.
+- Complete keyboard, accessible-state/focus, theme, high-contrast and DPI coverage with honest evidence boundaries.
+- Run hosted Windows/ARM64 builds and guarded integration gates. Local native WhatIf/reinstall, exact shortcut backup, modified-DLL and missing-PRI rejection checks pass. Local reproducibility, checksum, traversal and unavailable-certificate checks pass.
+- Resolve the existing Git staging anomaly before committing or publishing. Do not include the pre-existing mass staged deletion.
+
+Microsoft references: [unpackaged deployment](https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/unpackage-winui-app), [WinUI startup guidance](https://learn.microsoft.com/en-us/windows/apps/get-started/start-here), and [Windows App SDK release channels](https://learn.microsoft.com/en-us/windows/apps/windows-app-sdk/release-channels).
+
+## Native package evidence (local, 2026-10-23)
+
+A source-snapshot x64 package containing 545 files passed checksum, complete manifest, syntax, apphost/WinUI PE architecture and dependency-target verification. The app PRI is explicitly included through a project target because the unpackaged MRT Core build path omits it from publish items by default; see [Microsoft's tracked issue](https://github.com/microsoft/WindowsAppSDK/issues/6720). Compiler intermediates and package-test fixtures use temporary storage outside iCloud Drive.
+
+On a verified hidden desktop, the actual extracted archive's setup/reset/check/install launchers started the native Release app. Mutation actions began disabled, and installation confirmation was cancelled. A real fixture installation then hash-verified the entire runtime, created fixture-only native shortcuts, and successfully launched the installed checker. No developer-account folder settings or real Start menu/Desktop shortcuts were changed. Two unsigned builds were byte-identical; changed checksums, unsafe archive paths and unavailable signing certificates were rejected. The new verifier also accepted the immutable published v2.3.1 legacy archive. Source snapshots use an alternate Git index and remain unpublished; the original index state is preserved.

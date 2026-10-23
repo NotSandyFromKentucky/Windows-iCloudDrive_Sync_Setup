@@ -6,6 +6,10 @@ A per-user Windows Known Folders configurator with graphical and CLI entry point
 
 The [repository layout and development workflow](DEVELOPMENT.md), [CLI reference](CLI.md), and [measured verification history](VERIFICATION.md) are separate documents. Keep architecture decisions here and historical test evidence in verification.
 
+The native WinUI 3 migration is in ui/ICloudFolderSetup. Its [review decisions, measured coverage and remaining gates](WINUI.md) are tracked separately. tools/Invoke-WinUIBridge.ps1 reuses Get-SetupRequest and existing backends, transports structured progress/results, and preserves direct error output for friendly classification. Native installation uses the same verified per-user installer. Development Explorer entry points now launch NativeUI/ICloudFolderSetup.exe in setup, reset, check or install mode; an incomplete payload produces an actionable startup error. Published older releases remain unchanged.
+
+Native control accents follow Windows through the standard AccentButtonStyle and selection resources. Decorative identity combines cloud blue and a theme-adjusted system accent; text stays on system foreground brushes. Light, dark and HighContrast dictionaries remain separate, with high contrast delegating identity colors to system window/text resources. Theme fixtures change only the app's requested theme, not Windows personalization settings.
+
 ## Components
 
 | File | Role |
@@ -44,7 +48,7 @@ Recovery storage must not overlap source/destination trees. Manual restore accep
 
 Get-SetupRequest maps controls to existing scripts without duplicating registry logic. Encoded data passes user paths as data to a hidden child process. Output is read asynchronously; closing is blocked while running. Apply requires a matching successful preview/dry run and an action-specific confirmation with Cancel as the default. Option changes invalidate preview. The backend remains responsible for ShouldProcess and safety checks.
 
-The optional installer copies only manifest/central-release-listed files into a unique per-user version directory. It verifies copies before shortcut creation, preserves old binaries and backs up same-name shortcuts. It never redirects folders or installs iCloud. Portable execution and the legacy console wrapper remain supported.
+The optional installer copies only manifest/central-release-listed files into a unique per-user version directory. It captures validated source hashes during preflight and checks installed copies against those exact hashes before shortcut creation, so a source change during copying cannot become the new expected content. It preserves old binaries and backs up same-name shortcuts. A failed copy can leave an unlinked partial installation directory for inspection. It never redirects folders or installs iCloud. Portable execution and the legacy console wrapper remain supported.
 
 ## Explicit copy/merge
 
@@ -58,10 +62,14 @@ Sources are always retained. Partial destination copies remain on failure for in
 
 Local tests use fake registry access or unique file/GUI/install fixtures. Real integration is restricted to guarded disposable guests. Never use live developer-account redirection as a test. One real cloud round trip was observed on 2026-10-18; that does not certify all providers, versions or applications.
 
-VERSION and build/ReleaseFiles.json define distribution inputs. Packages are built from exact committed source, optionally signed in staging, manifested and checksummed. Version-tag publication is gated by CI and remote-byte verification. Published tags/assets are immutable. Detailed commands and evidence belong in the linked development and verification guides.
+VERSION and build/ReleaseFiles.json define distribution inputs. The version-2 release policy separates runtime files from native compile inputs and defines resource/dependency requirements and size bounds. Native builds archive exact Git source into a short temporary directory outside iCloud Drive, publish with locked dependencies, and validate the apphost/WinUI PE architecture and dependency target. A project-local target explicitly publishes the generated app PRI, working around the unpackaged SDK omission. Packages include every runtime file in the hash manifest and exclude compiler sources/intermediates. Optional signing covers project scripts and owned native binaries, retaining vendor signatures. Version-tag publication is gated by CI and remote-byte verification. Published tags/assets are immutable. Detailed commands and evidence belong in the linked development and verification guides.
 
 ## GUI progress and accessibility
 
 Copy workers send prefixed JSON progress lines over standard output and accept a uniquely named local cancellation event. Cancellation is cooperative at file boundaries; copying and SHA-256 verification of the current file finish first. Exit code 3 means safely stopped. Registry writes are never interrupted through this mechanism. Technical output is optional; normal results explain next steps. Controls expose accessible names and descriptions, a logical tab sequence and keyboard mnemonics. Enter previews; confirmation defaults to Cancel. Auto-sized rows and wrapping accommodate enlarged text.
 
 Test-UserExperience.ps1 exercises real UI Automation and MSAA properties, keyboard focus, modal cancellation, 100/125/150/200 percent layout/font fixtures, and a real child copy worker stopped after its first verified file. These fixtures do not certify Narrator speech or physical multi-monitor DPI transitions.
+
+GUI fixture tests now run by default on a uniquely named hidden desktop, with the child's desktop verified before executing the suite. The runner never switches the input desktop and contains the process tree in a timeout-controlled job. This prevents test windows taking focus; it is not a security sandbox and does not relax the prohibition on live developer-account redirection tests. See DEVELOPMENT.md for commands and evidence boundaries.
+
+Native high-contrast integration additionally requires Assert-IsolatedEnvironment.ps1 before any personalization API call. It temporarily toggles contrast only in disposable Sandbox/hosted Windows, restores flags/scheme in finally and checks the native app's observed palette. This gate is configured but has not yet run in a hosted environment; compilation and developer-account refusal do not establish real contrast-theme support.

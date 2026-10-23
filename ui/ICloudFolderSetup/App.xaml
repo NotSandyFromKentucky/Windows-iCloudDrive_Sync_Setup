@@ -1,0 +1,29 @@
+<Application x:Class="ICloudFolderSetup.App"
+ xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+ xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+ <Application.Resources>
+  <ResourceDictionary>
+   <ResourceDictionary.MergedDictionaries><XamlControlsResources xmlns="using:Microsoft.UI.Xaml.Controls" /></ResourceDictionary.MergedDictionaries>
+   <ResourceDictionary.ThemeDictionaries>
+    <ResourceDictionary x:Key="Light">
+     <SolidColorBrush x:Key="CloudIdentityBrush" Color="#0067C0" />
+     <SolidColorBrush x:Key="CloudIdentityBackgroundBrush" Color="#E8F3FF" />
+     <SolidColorBrush x:Key="IdentityBorderBrush" Color="Transparent" />
+     <SolidColorBrush x:Key="WindowsIdentityBrush" Color="{ThemeResource SystemAccentColorDark1}" />
+    </ResourceDictionary>
+    <ResourceDictionary x:Key="Default">
+     <SolidColorBrush x:Key="CloudIdentityBrush" Color="#73B9FF" />
+     <SolidColorBrush x:Key="CloudIdentityBackgroundBrush" Color="#17344D" />
+     <SolidColorBrush x:Key="IdentityBorderBrush" Color="Transparent" />
+     <SolidColorBrush x:Key="WindowsIdentityBrush" Color="{ThemeResource SystemAccentColorLight2}" />
+    </ResourceDictionary>
+    <ResourceDictionary x:Key="HighContrast">
+     <SolidColorBrush x:Key="CloudIdentityBrush" Color="{ThemeResource SystemColorWindowTextColor}" />
+     <SolidColorBrush x:Key="CloudIdentityBackgroundBrush" Color="{ThemeResource SystemColorWindowColor}" />
+     <SolidColorBrush x:Key="IdentityBorderBrush" Color="{ThemeResource SystemColorWindowTextColor}" />
+     <SolidColorBrush x:Key="WindowsIdentityBrush" Color="{ThemeResource SystemColorWindowTextColor}" />
+    </ResourceDictionary>
+   </ResourceDictionary.ThemeDictionaries>
+  </ResourceDictionary>
+ </Application.Resources>
+</Application>

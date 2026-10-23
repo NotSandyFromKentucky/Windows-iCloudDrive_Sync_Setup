@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Verifies installed files against hashes captured before copying, rejecting source changes during installation before creating shortcuts. Adds native reinstall, exact shortcut-backup and incomplete/tampered-payload checks.
+
+- Keeps the Windows system accent for native controls and adds restrained, theme-aware cloud/Windows identity colors with system-color high-contrast overrides.
+
+- Adds native WinUI 3 navigation, confirmations and file pickers, an asynchronous PowerShell bridge, live copy progress and safe cancellation. Development Explorer launchers now require the complete native payload; published older releases remain unchanged.
+- Builds self-contained native packages from immutable source with locked dependencies, resource/architecture validation, complete file hashes and reproducible unsigned archives. Tests the extracted launchers and installed native checker on a hidden desktop.
+- Adds a native per-user installation dialog and native-payload/shortcut validation using the existing verified installer.
+
+- Runs GUI fixture suites on a verified separate desktop so test windows do not take focus; propagates errors and contains timed-out process trees.
+
 - Adds plain-language results and actionable errors, optional technical details, and action-specific confirmations defaulting to Cancel.
 - Shows live copy progress and supports stopping after the current file is copied and verified, retaining originals and completed copies.
 - Improves keyboard access, accessible control metadata and enlarged-text layouts; adds UI Automation, scaling and safe-cancellation regression fixtures.

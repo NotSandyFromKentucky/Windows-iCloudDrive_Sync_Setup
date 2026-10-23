@@ -1,5 +1,6 @@
 #requires -Version 5.1
 $ErrorActionPreference='Stop'
+if(& (Join-Path $PSScriptRoot 'Enter-TestDesktop.ps1') -ScriptPath $PSCommandPath){return}
 if([Threading.Thread]::CurrentThread.ApartmentState -ne 'STA'){
     & powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File $PSCommandPath
     if($LASTEXITCODE -ne 0){throw 'STA UX suite failed'};return

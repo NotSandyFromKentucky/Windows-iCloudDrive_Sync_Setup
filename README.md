@@ -11,9 +11,11 @@ Download the ZIP from [GitHub Releases](https://github.com/NotSandyFromKentucky/
 
 Run normally as your own Windows account. Administrator access is unnecessary. Installation copies application files only; it does not configure folders or install iCloud. Release archives include SHA-256 checksums and a per-file manifest. Packages are unsigned; hashes do not authenticate the publisher. See the [changelog](CHANGELOG.md).
 
+If installation reports changed or incomplete application files, extract a fresh copy of the release ZIP and retry. Existing installations and their shortcuts remain available when file verification fails before shortcut creation.
+
 ## Requirements
 
-- Windows and Windows PowerShell 5.1. The graphical launchers use Windows Forms and a process-only execution-policy override; machine policy is unchanged.
+- Windows and Windows PowerShell 5.1. The native WinUI package bundles its .NET/Windows App SDK runtime. Explorer entry points use a process-only execution-policy override for the launcher/backend; machine policy is unchanged.
 - iCloud for Windows signed in with an existing Drive folder for iCloud setup and cloud verification.
 - Reset and backup restore do not require an available iCloud installation. Copying cloud-only files requires the provider to make their contents available.
 
@@ -85,6 +87,8 @@ A real round trip passed on 2026-10-18 with iCloud for Windows 15.10.39.0. That 
 Application files are copied into unique version directories beneath %LOCALAPPDATA%\Programs\ICloudFolderSettler. Copies are hash-verified before current-user shortcuts are created. Existing binaries, recovery records and same-name shortcuts are retained or backed up. A failed install can leave its isolated directory for inspection; it never applies folder changes.
 
 ## Project documentation
+
+The [WinUI 3 migration](docs/WINUI.md) is under development. Source entry points now expect the complete NativeUI payload from the native package. The currently published older release retains its original interface; no release assets have been replaced. Building from source requires the pinned .NET SDK and the native packaging workflow.
 
 - [Command-line reference](docs/CLI.md)
 - [Architecture and repository structure](docs/CONTEXT.md)

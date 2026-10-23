@@ -7,3 +7,5 @@
 before.json
 *.reg
 /RestoreRegistry.bat
+/ui/**/bin/
+/ui/**/obj/
