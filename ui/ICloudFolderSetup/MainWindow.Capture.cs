@@ -70,7 +70,7 @@ public sealed partial class MainWindow
                 if(i>0 && ReferenceEquals(focused,ActionChoice)) throw new InvalidOperationException("Unexpected focus cycle before reaching the window boundary.");
                 var peer=FrameworkElementAutomationPeer.FromElement(focused) ?? FrameworkElementAutomationPeer.CreatePeerForElement(focused);
                 keyboard.Add(new {Id=AutomationProperties.GetAutomationId(focused),Element=focused.Name,
-                    Name=peer?.GetName(),Role=peer?.GetAutomationControlType().ToString()});
+                    Name=peer?.GetName(),Role=peer?.GetAutomationControlType().ToString(),Help=peer?.GetHelpText()});
                 if(!FocusManager.TryMoveFocus(FocusNavigationDirection.Next,new FindNextElementOptions{SearchRoot=Root})){keyboardBoundary=true;break;}
                 await Task.Delay(30);
             }

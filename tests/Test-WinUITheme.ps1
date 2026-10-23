@@ -30,7 +30,8 @@ foreach($theme in @('Light','Dark')){
         }else{
             if($palette.WindowsColor -cne $palette.ExpectedWindowsColor -or $palette.CloudColor -cne $palette.ExpectedWindowsColor){throw ('High-contrast identity differs from system window text: '+($palette | ConvertTo-Json -Compress))}
         }
-        Write-Output ('PASS: real '+$theme+' render and system-accent/theme palette; screenshot: '+$image)
+        $paletteKind=if($palette.HighContrast){'system high-contrast'}else{'system-accent/theme'}
+        Write-Output ('PASS: real '+$theme+' render and '+$paletteKind+' palette; screenshot: '+$image)
     }finally{if(-not $process.HasExited){$process.Kill();$process.WaitForExit(5000) | Out-Null};$process.Dispose()}
 }
 [xml]$resources=[IO.File]::ReadAllText((Join-Path $repo 'ui/ICloudFolderSetup/App.xaml'))
@@ -39,4 +40,4 @@ $ns.AddNamespace('x','http://schemas.microsoft.com/winfx/2006/xaml');$ns.AddName
 $contrast=$resources.SelectSingleNode('//p:ResourceDictionary[@x:Key="HighContrast"]',$ns)
 if($null -eq $contrast -or $contrast.ChildNodes.Count -ne 4){throw 'Missing high-contrast identity palette.'}
 foreach($brush in $contrast.ChildNodes){if($brush.Color -notlike '{ThemeResource SystemColor*}'){throw 'High-contrast branding uses a fixed color.'}}
-'PASS: high-contrast palette delegates to system colors; actual OS high-contrast switching remains a separate manual check'
+'PASS: high-contrast resource palette delegates to system colors; OS switching is verified separately by the guarded contrast suite'

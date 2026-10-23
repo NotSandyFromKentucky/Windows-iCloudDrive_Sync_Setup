@@ -43,20 +43,20 @@
         <ComboBox x:Name="ActionChoice" Header="Action" HorizontalAlignment="Stretch" SelectionChanged="OptionsChanged" AutomationProperties.AutomationId="ActionChoice" />
         <Grid x:Name="CloudRootRow" ColumnSpacing="12">
          <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
-         <TextBox x:Name="CloudRoot" Header="iCloud Drive folder" TextChanged="OptionsChanged" AutomationProperties.AutomationId="CloudRoot" />
+         <TextBox x:Name="CloudRoot" Header="iCloud Drive folder" TextChanged="OptionsChanged" AutomationProperties.AutomationId="CloudRoot" AutomationProperties.HelpText="Choose the existing iCloud Drive folder. Preview checks its Windows registration; registration does not prove synchronization." />
          <Button Grid.Column="1" Content="Browse…" VerticalAlignment="Bottom" Click="BrowseRoot" AccessKey="B" AutomationProperties.AutomationId="BrowseRoot" AutomationProperties.Name="Browse for iCloud Drive folder" />
         </Grid>
         <Grid x:Name="BackupRow" ColumnSpacing="12" Visibility="Collapsed">
          <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
-         <TextBox x:Name="BackupFile" Header="Recovery backup (before.json)" TextChanged="OptionsChanged" AutomationProperties.AutomationId="BackupFile" />
+         <TextBox x:Name="BackupFile" Header="Recovery backup (before.json)" TextChanged="OptionsChanged" AutomationProperties.AutomationId="BackupFile" AutomationProperties.HelpText="Choose a trusted before.json backup for this Windows account. Preview validates it before restoring any settings." />
          <Button Grid.Column="1" Content="Choose…" VerticalAlignment="Bottom" Click="BrowseBackup" AutomationProperties.AutomationId="BrowseBackup" AutomationProperties.Name="Choose recovery backup" />
         </Grid>
-        <CheckBox x:Name="Music" Content="Include Music" Checked="OptionsChanged" Unchecked="OptionsChanged" />
+        <CheckBox x:Name="Music" Content="Include Music" Checked="OptionsChanged" Unchecked="OptionsChanged" AutomationProperties.HelpText="Include Music in this action. Reset to Windows defaults always includes Music." />
         <Expander x:Name="Advanced" Header="Advanced options" HorizontalAlignment="Stretch">
          <StackPanel Spacing="12">
-          <CheckBox x:Name="ManualRoot" Checked="OptionsChanged" Unchecked="OptionsChanged"><TextBlock Text="Use a manually verified iCloud folder" TextWrapping="Wrap" /></CheckBox>
+          <CheckBox x:Name="ManualRoot" Checked="OptionsChanged" Unchecked="OptionsChanged" AutomationProperties.HelpText="Use only when Windows has no iCloud registration. A known folder mismatch cannot be overridden."><TextBlock Text="Use a manually verified iCloud folder" TextWrapping="Wrap" /></CheckBox>
           <TextBlock Text="Only when Windows has no iCloud registration. A known folder mismatch cannot be overridden." TextWrapping="Wrap" Style="{StaticResource CaptionTextBlockStyle}" />
-          <CheckBox x:Name="KeepFiles" Checked="OptionsChanged" Unchecked="OptionsChanged"><TextBlock Text="Change locations without copying existing files" TextWrapping="Wrap" /></CheckBox>
+          <CheckBox x:Name="KeepFiles" Checked="OptionsChanged" Unchecked="OptionsChanged" AutomationProperties.HelpText="Existing files stay where they are. Use a separate Copy files action first to merge existing content."><TextBlock Text="Change locations without copying existing files" TextWrapping="Wrap" /></CheckBox>
           <TextBlock Text="To merge existing content, run a separate Copy files action first. Originals are always retained." TextWrapping="Wrap" Style="{StaticResource CaptionTextBlockStyle}" />
          </StackPanel>
         </Expander>

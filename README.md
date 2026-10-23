@@ -23,7 +23,7 @@ Registration confirms the configured Drive path, not synchronization health. See
 
 ## Use the graphical window
 
-Choose an action and its options, then click **Preview / Check** or **Dry run**. Review the displayed paths and warnings. An action-specific button becomes available only after a successful preview/dry run of the same options. Its confirmation names the action, with Cancel selected by default. Changing options invalidates the reviewed preview. The window remains responsive while operations run and cannot close until they finish. Content scrolls at smaller sizes while action buttons remain visible. Results use plain language; select **Technical details** for raw output and exit codes.
+Choose an action and its options, then click **Preview / Check** or **Dry run**. Review the displayed paths and warnings. An action-specific button becomes available only after a successful preview/dry run of the same options. Its confirmation names the action, with Cancel selected by default. Changing options invalidates the reviewed preview. The window remains responsive while operations run and cannot close until they finish. Content scrolls at smaller sizes while action buttons remain visible. Results use plain language; select **Technical details** for raw output and exit codes. Path fields and advanced options also expose their explanations to assistive technology.
 
 | Action | What it does |
 | --- | --- |

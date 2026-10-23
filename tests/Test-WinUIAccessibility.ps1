@@ -39,5 +39,11 @@ try{
         if($nodes[0].Name -cne $expected[$id][0] -or $nodes[0].Role -cne $expected[$id][1]){throw ('Incorrect accessible name/role: '+$id)}
     }
     if(@($report.Keyboard | Where-Object {$_.Element -eq 'Apply' -or $_.Id -eq 'Apply'}).Count){throw 'Disabled Apply is in the tab sequence.'}
+    foreach($id in @('CloudRoot','Music','ManualRoot','KeepFiles')){
+        $node=@($report.Keyboard|Where-Object Element -eq $id)[0]
+        if([string]::IsNullOrWhiteSpace($node.Help)){throw ('Explanatory help is unavailable to assistive technology: '+$id)}
+    }
+    if(($report.Keyboard|Where-Object Element -eq 'ManualRoot').Help -notlike '*cannot be overridden*'){throw 'Manual-root accessibility help omits the mismatch restriction.'}
+    if(($report.Keyboard|Where-Object Element -eq 'KeepFiles').Help -notlike '*files stay where they are*'){throw 'Existing-content accessibility help omits retained originals.'}
     'PASS: native forward/reverse focus navigation, reachable named controls, logical reverse order and skipped disabled Apply'
 }finally{if(-not $process.HasExited){$process.Kill();$process.WaitForExit(5000)|Out-Null};$process.Dispose()}
