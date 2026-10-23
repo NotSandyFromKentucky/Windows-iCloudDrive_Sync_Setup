@@ -5,6 +5,11 @@ $runner=Join-Path $PSScriptRoot 'Invoke-HiddenDesktop.ps1'
 $probe=Join-Path $PSScriptRoot 'fixtures/HiddenDesktopProbe.ps1'
 $before=[ICloudTestDesktop]::InputName()
 & $runner -ScriptPath $probe
+$originalModules=$env:PSModulePath
+try{
+    $env:PSModulePath=Join-Path (Split-Path $PSScriptRoot -Parent) '.local/nonexistent-parent-modules'
+    & $runner -ScriptPath $probe
+}finally{$env:PSModulePath=$originalModules}
 if([ICloudTestDesktop]::InputName() -cne $before){throw 'Input desktop changed.'}
 $failed=$false
 try{& $runner -ScriptPath $probe -Parameters @{Mode='Fail'}}catch{$failed=$_.Exception.Message -like '*exit code 1*'}

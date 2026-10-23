@@ -21,10 +21,13 @@ public static class ICloudContrastFixture
     }
     public static void Write(State state)
     {
+        // SystemParametersInfo may replace the structure's string pointer.
+        // Release only the allocation owned by this call, never its returned pointer.
+        IntPtr scheme=Marshal.StringToHGlobalUni(state.Scheme ?? "");
         var value=new HighContrast { Size=(uint)Marshal.SizeOf(typeof(HighContrast)), Flags=state.Flags,
-            Scheme=Marshal.StringToHGlobalUni(state.Scheme ?? "") };
+            Scheme=scheme };
         try {
             if(!Parameters(0x43,value.Size,ref value,2)) throw new Win32Exception(Marshal.GetLastWin32Error());
-        } finally { Marshal.FreeHGlobal(value.Scheme); }
+        } finally { Marshal.FreeHGlobal(scheme); }
     }
 }

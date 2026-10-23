@@ -19,6 +19,9 @@ $spec=@{Script=$scriptFile;Parameters=$Parameters;Native=$native;Desktop=$deskto
 $data=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($spec | ConvertTo-Json -Depth 8 -Compress)))
 $command=@'
 $ErrorActionPreference='Stop'
+# A PowerShell 7 parent can pass module paths incompatible with Windows PowerShell.
+# These fixtures deliberately run in 5.1; resolve its own built-in modules first.
+$env:PSModulePath=[IO.Path]::Combine($PSHOME,'Modules')+';'+[IO.Path]::Combine([Environment]::GetFolderPath('ProgramFiles'),'WindowsPowerShell','Modules')
 $spec=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('DATA')) | ConvertFrom-Json
 try {
     Add-Type -Path $spec.Native
