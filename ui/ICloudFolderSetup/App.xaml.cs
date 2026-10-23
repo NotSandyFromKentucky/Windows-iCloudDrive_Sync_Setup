@@ -15,6 +15,7 @@ public partial class App : Application
         try{
             window = new MainWindow();
             window.Activate();
+            await ((MainWindow)window).InitializeAsync();
 #if DEBUG
             var arguments=Environment.GetCommandLineArgs();
             var render=Array.IndexOf(arguments,"--render-fixture");

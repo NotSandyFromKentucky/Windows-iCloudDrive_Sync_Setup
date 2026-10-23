@@ -27,9 +27,9 @@ public sealed class BackendClient
     private bool running;
     public string Source {get;}
     public BackendClient(string source) => Source=Path.GetFullPath(source);
-    public FolderDefinition[] ReadFolderDefinitions()
+    public async Task<FolderDefinition[]> ReadFolderDefinitionsAsync()
     {
-        var result=RunAsync(new SetupOptions("Get folder definitions","","",false,false,false,false),"Preview",_=>{}).GetAwaiter().GetResult();
+        var result=await RunAsync(new SetupOptions("Get folder definitions","","",false,false,false,false),"Preview",_=>{}).ConfigureAwait(false);
         if(result.ExitCode!=0)throw new IOException("Folder destinations could not be loaded. Extract or reinstall the complete package. "+result.Text);
         return JsonSerializer.Deserialize<FolderDefinition[]>(result.Text) ?? throw new IOException("Folder definitions are missing.");
     }

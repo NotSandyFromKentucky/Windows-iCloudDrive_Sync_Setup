@@ -69,6 +69,8 @@ VERSION and build/ReleaseFiles.json define distribution inputs. The native proje
 
 ## GUI progress and accessibility
 
+Native startup activates the window before asynchronously reading folder definitions. Preview and mutation controls stay disabled until the central map loads; a loading failure leaves an actionable error and permits closing without enabling incomplete plans. Rendering fixtures await initialization. No synchronous wait on the PowerShell worker belongs on the UI thread.
+
 Copy workers send prefixed JSON progress lines over standard output and accept a uniquely named local cancellation event. Cancellation is cooperative at file boundaries; copying and SHA-256 verification of the current file finish first. Exit code 3 means safely stopped. Registry writes are never interrupted through this mechanism. Technical output is optional; normal results explain next steps. Controls expose accessible names and descriptions, a logical tab sequence and keyboard mnemonics. Native path fields and advanced checkboxes attach their safety explanations as automation help text; the peer-level accessibility fixture verifies the mismatch restriction and retained-files guidance. Enter previews; confirmation defaults to Cancel. Auto-sized rows and wrapping accommodate enlarged text.
 
 Test-UserExperience.ps1 exercises real UI Automation and MSAA properties, keyboard focus, modal cancellation, 100/125/150/200 percent layout/font fixtures, and a real child copy worker stopped after its first verified file. These fixtures do not certify Narrator speech or physical multi-monitor DPI transitions.

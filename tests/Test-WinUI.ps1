@@ -42,6 +42,12 @@ try{
     Copy-Item -LiteralPath (Join-Path $repo 'ICloudFolderSetup.UI.psm1') -Destination $fixture
     Copy-Item -LiteralPath (Join-Path $repo 'ICloudFolders.psm1') -Destination $fixture
     Copy-Item -LiteralPath (Join-Path $repo 'tools/Invoke-WinUIBridge.ps1') -Destination (Join-Path $fixture 'tools')
+    # Delay only the read-only metadata fixture to prove the window renders
+    # while startup work is pending and cannot execute an incomplete plan.
+    $bridgePath=Join-Path $fixture 'tools/Invoke-WinUIBridge.ps1'
+    $delay="if(`$request.Action -eq 'Get folder definitions'){ `$deadline=[DateTime]::UtcNow.AddSeconds(35); while(-not (Test-Path (Join-Path `$root 'release-metadata'))){if([DateTime]::UtcNow -gt `$deadline){throw 'Metadata fixture timed out'};Start-Sleep -Milliseconds 100};"
+    $bridgeText=[IO.File]::ReadAllText($bridgePath).Replace("if(`$request.Action -eq 'Get folder definitions'){",$delay)
+    [IO.File]::WriteAllText($bridgePath,$bridgeText)
     @'
 [CmdletBinding(SupportsShouldProcess)]
 param([string]$ICloudRoot,[switch]$IncludeMusic,[switch]$Apply,[switch]$VerifiedSyncRoot,[switch]$AllowExistingContent,[switch]$ResetToDefaults,[string]$RestoreBackup,[hashtable]$FolderPaths=@{})
@@ -71,6 +77,10 @@ exit 0
     $window=[Windows.Automation.AutomationElement]::FromHandle([ICloudTestDesktop]::FindWindowForProcess($process.Id,'iCloud folder setup'))
     Write-Output ('Native window: '+$window.Current.Name+'; '+$window.Current.ClassName)
     Wait-For {$null -ne (Find-Control 'CloudRoot')} 'Native controls did not become available'
+    Assert (-not (Find-Control 'Preview').Current.IsEnabled) 'Preview enabled before delayed folder definitions loaded'
+    Assert (-not (Find-Control 'Apply').Current.IsEnabled) 'Apply enabled during startup'
+    Write-Output 'PASS: native window and automation respond during delayed startup; actions remain disabled'
+    [IO.File]::WriteAllText((Join-Path $fixture 'release-metadata'),'continue')
     Wait-For {Test-Path -LiteralPath $render} 'WinUI rendering fixture did not complete'
     $root=Find-Control 'CloudRoot';$preview=Find-Control 'Preview';$apply=Find-Control 'Apply'
     Assert (-not $apply.Current.IsEnabled) 'Apply enabled before any preview'

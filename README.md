@@ -42,6 +42,8 @@ For direct Explorer access, **Reset-WindowsFolderDefaults.cmd** opens reset mode
 
 ## Folder scope
 
+At startup, the window displays a loading status while it reads the shared folder definitions. Actions become available when loading finishes. Folder and navigation pictograms use Windows-provided icons alongside text labels.
+
 | Folder | Destination beneath the iCloud root | Setup default |
 | --- | --- | --- |
 | Desktop | Desktop | Included |

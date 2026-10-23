@@ -20,7 +20,6 @@ public sealed partial class MainWindow : Window
         InitializeComponent();
         Root.SizeChanged+=(_,_)=>RefreshCommandLayout();
         backend=new BackendClient(FindSource());
-        InitializeFolderRows(backend.ReadFolderDefinitions());
         AppWindow.Resize(new Windows.Graphics.SizeInt32(1060,860));
         Root.Loaded+=(_,_)=> {
             var scale=Root.XamlRoot.RasterizationScale;
@@ -33,12 +32,27 @@ public sealed partial class MainWindow : Window
         var mode=Argument("--mode");
         if(mode=="Reset") ActionChoice.SelectedItem="Reset to Windows defaults";
         if(mode=="Check") ShowCategory("Check");
-        if(mode=="Install") Root.Loaded+=async(_,_)=>{try{await InstallAsync();}catch(Exception error){ShowError(error);}};
+        SetBusy(true,Snapshot());
+        SetStatus("Loading folder destinations","Preparing your folder choices. No settings are being changed.");
         AppWindow.Closing+=(_,args)=> {
             if(!busy) return;
             args.Cancel=true;
             SetStatus("Operation still running","Wait for its result before closing. Copies can stop after the current file; folder changes must finish.",InfoBarSeverity.Warning);
         };
+    }
+    internal async Task InitializeAsync()
+    {
+        try{
+            InitializeFolderRows(await backend.ReadFolderDefinitionsAsync());
+            SetBusy(false,Snapshot());
+            InvalidateReview();
+            if(Argument("--mode")=="Install")await InstallAsync();
+        }catch(Exception error){
+            // Keep actions unavailable when the authoritative folder map cannot load,
+            // but permit closing the window and reading the actionable error.
+            busy=false;Progress.Visibility=Visibility.Collapsed;
+            ShowError(error);
+        }
     }
     private string? Argument(string key)
     {
