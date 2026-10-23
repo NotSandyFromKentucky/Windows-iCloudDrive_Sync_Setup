@@ -95,6 +95,8 @@ A version-tag push runs the full validation workflow before publishing. The rele
 
 ## Remaining external gates
 
+Hosted run 39944837536 (source 9a2eac0e45ed9adc7aa5ed7d3e9353aa84201609) passed all six Windows 2022/2025/11 ARM shell-matrix jobs and all three guarded real-registry/API integration jobs on 2026-10-23. The overall run failed in a native UI Automation footer lookup before high-contrast and package checks; it is not an overall CI pass. The footer lookup now waits for readiness, and independent high-contrast/ARM64 steps remain mandatory even when another native fixture fails.
+
 The unreleased native x64 package passed local checksum, complete-file manifest, syntax, PE architecture and dependency-target checks on 2026-10-23. Two builds from the same immutable source produced identical unsigned bytes. Rejection tests passed for changed checksums, unsafe ZIP paths and unavailable signing certificates. The updated verifier also accepted the published legacy v2.3.1 archive. On a verified hidden desktop, all four extracted entry modes started the Release app, and a complete fixture installation launched its installed checker. Hosted CI, ARM64 runtime, Narrator speech and physical DPI transitions remain unverified. See [native migration evidence and remaining gates](WINUI.md).
 
 - Repeat the documented remote round trip on each new installation or when diagnosing sync problems. The observed pass above applies to the tested account, version and time.

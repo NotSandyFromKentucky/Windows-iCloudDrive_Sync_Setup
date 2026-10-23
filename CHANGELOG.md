@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Keeps action buttons visible with enlarged text by scrolling headings and instructions, wrapping the identity caption, and giving narrow windows a full-width primary action.
+
 - Verifies installed files against hashes captured before copying, rejecting source changes during installation before creating shortcuts. Adds native reinstall, exact shortcut-backup and incomplete/tampered-payload checks.
 
 - Keeps the Windows system accent for native controls and adds restrained, theme-aware cloud/Windows identity colors with system-color high-contrast overrides.

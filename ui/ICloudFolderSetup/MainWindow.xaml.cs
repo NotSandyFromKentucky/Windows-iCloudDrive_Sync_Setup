@@ -18,6 +18,7 @@ public sealed partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        Root.SizeChanged+=(_,_)=>RefreshCommandLayout();
         backend=new BackendClient(FindSource());
         AppWindow.Resize(new Windows.Graphics.SizeInt32(1060,860));
         Root.Loaded+=(_,_)=> {
@@ -42,6 +43,14 @@ public sealed partial class MainWindow : Window
     {
         var index=Array.IndexOf(arguments,key);
         return index>=0 && index+1<arguments.Length ? arguments[index+1] : null;
+    }
+    private void RefreshCommandLayout()
+    {
+        bool narrow=Root.ActualWidth<640;
+        Grid.SetRow(Apply,narrow ? 1 : 0);Grid.SetColumn(Apply,narrow ? 0 : 2);Grid.SetColumnSpan(Apply,narrow ? 3 : 1);
+        Apply.HorizontalAlignment=narrow ? HorizontalAlignment.Stretch : HorizontalAlignment.Left;
+        Apply.Margin=narrow ? new Thickness(0,8,0,0) : new Thickness(0);
+        Grid.SetRow(Stop,narrow ? 2 : 1);
     }
     private string FindSource()
     {

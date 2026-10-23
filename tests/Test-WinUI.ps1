@@ -34,6 +34,10 @@ function Select-OrInvoke($Control){
     elseif($Control.TryGetCurrentPattern([Windows.Automation.InvokePattern]::Pattern,[ref]$pattern)){$pattern.Invoke()}
     else{throw ('Navigation item has no selection/invoke pattern: '+$Control.Current.Name+'; '+$Control.Current.ControlType.ProgrammaticName)}
 }
+function Select-NavigationId([string]$Id){
+    Wait-For {$item=Find-Control $Id;$null -ne $item -and $item.Current.IsEnabled} ('Navigation item not ready: '+$Id)
+    Select-OrInvoke (Find-Control $Id)
+}
 try{
     Copy-Item -LiteralPath (Join-Path $repo 'ICloudFolderSetup.UI.psm1') -Destination $fixture
     Copy-Item -LiteralPath (Join-Path $repo 'tools/Invoke-WinUIBridge.ps1') -Destination (Join-Path $fixture 'tools')
@@ -159,13 +163,13 @@ param([switch]$DesktopShortcut)
 [IO.File]::WriteAllText((Join-Path (Split-Path $PSScriptRoot -Parent) 'install-fixture.txt'),'fixture only')
 Write-Output 'Installed application: isolated fixture'
 '@ | Set-Content -LiteralPath (Join-Path $fixture 'tools/Invoke-WinUIInstall.ps1') -Encoding UTF8
-    Select-OrInvoke (Find-Control 'InstallNavigation')
+    Select-NavigationId 'InstallNavigation'
     Wait-For {$null -ne (Find-Name 'Cancel')} 'Native install confirmation did not open'
     Invoke-Control (Find-Name 'Cancel')
     Assert (-not(Test-Path (Join-Path $fixture 'install-fixture.txt'))) 'Cancelled installation reached backend'
     # Selecting the same footer item again may not raise SelectionChanged; select a category first.
     (Find-Name 'Folder locations').GetCurrentPattern([Windows.Automation.SelectionItemPattern]::Pattern).Select()
-    Select-OrInvoke (Find-Control 'InstallNavigation')
+    Select-NavigationId 'InstallNavigation'
     Wait-For {$null -ne (Find-Name 'Cancel')} 'Native install confirmation did not reopen'
     $condition=New-Object Windows.Automation.AndCondition((New-Object Windows.Automation.PropertyCondition([Windows.Automation.AutomationElement]::NameProperty,'Install for me')),(New-Object Windows.Automation.PropertyCondition([Windows.Automation.AutomationElement]::ControlTypeProperty,[Windows.Automation.ControlType]::Button)))
     Invoke-Control ($window.FindFirst([Windows.Automation.TreeScope]::Descendants,$condition))

@@ -38,6 +38,24 @@ public sealed partial class MainWindow
         }
         await Task.Delay(500);
         Root.UpdateLayout();
+        double fontScale=double.Parse(Argument("--fixture-font-scale") ?? "1",System.Globalization.CultureInfo.InvariantCulture);
+        if(fontScale<1 || fontScale>2) throw new ArgumentException("Fixture font scale outside supported bounds.");
+        if(fontScale!=1){
+            // Snapshot first so inherited sizes are not multiplied twice while walking templates.
+            var changes=new List<Action>();
+            void CollectTextSizes(DependencyObject element){
+                if(element is Microsoft.UI.Xaml.Controls.Control control){
+                    double size=control.FontSize;changes.Add(()=>control.FontSize=size*fontScale);
+                }else if(element is Microsoft.UI.Xaml.Controls.TextBlock text){
+                    double size=text.FontSize;changes.Add(()=>text.FontSize=size*fontScale);
+                }
+                for(int i=0;i<VisualTreeHelper.GetChildrenCount(element);i++) CollectTextSizes(VisualTreeHelper.GetChild(element,i));
+            }
+            CollectTextSizes(Root);
+            foreach(var change in changes) change();
+            Root.UpdateLayout();
+            await Task.Delay(500);
+        }
         var keyboard=new List<object>();
         var keyboardReverse=new List<string>();
         bool keyboardBoundary=false;
@@ -73,6 +91,11 @@ public sealed partial class MainWindow
         var bitmap=new RenderTargetBitmap();
         await bitmap.RenderAsync(Root);
         var pixels=(await bitmap.GetPixelsAsync()).ToArray();
+        int VisiblePixels(){int count=0;for(int i=3;i<pixels.Length;i+=4) if(pixels[i]!=0) count++;return count;}
+        for(int i=0;i<5 && VisiblePixels()<bitmap.PixelWidth*bitmap.PixelHeight/100;i++){
+            await Task.Delay(200);await bitmap.RenderAsync(Root);pixels=(await bitmap.GetPixelsAsync()).ToArray();
+        }
+        if(VisiblePixels()<bitmap.PixelWidth*bitmap.PixelHeight/100) throw new InvalidOperationException("Native rendering fixture produced an empty frame.");
         using var stream=new InMemoryRandomAccessStream();
         var encoder=await BitmapEncoder.CreateAsync(BitmapEncoder.PngEncoderId,stream);
         encoder.SetPixelData(BitmapPixelFormat.Bgra8,BitmapAlphaMode.Premultiplied,(uint)bitmap.PixelWidth,(uint)bitmap.PixelHeight,96,96,pixels);
@@ -93,12 +116,12 @@ public sealed partial class MainWindow
             return new {X=point.X,Y=point.Y,Width=element.ActualWidth,Height=element.ActualHeight,Visible=element.Visibility==Visibility.Visible};
         }
         await File.WriteAllTextAsync(path+".json.tmp",JsonSerializer.Serialize(new{
-            Theme=Root.ActualTheme.ToString(),HighContrast=highContrast,
+            Theme=Root.ActualTheme.ToString(),HighContrast=highContrast,FontScale=fontScale,
             SystemAccent=settings.GetColorValue(UIColorType.Accent).ToString(),
             WindowsColor=windows.ToString(),ExpectedWindowsColor=expected.ToString(),CloudColor=cloud.ToString(),
             Keyboard=keyboard,KeyboardBoundary=keyboardBoundary,KeyboardReverse=keyboardReverse,
             Layout=new {Action=Snapshot().Action,Width=Root.ActualWidth,Height=Root.ActualHeight,
-                Preview=Bounds(Preview),DryRun=Bounds(DryRun),Apply=Bounds(Apply),CloudRoot=Bounds(CloudRootRow),Backup=Bounds(BackupRow)}
+                Preview=Bounds(Preview),DryRun=Bounds(DryRun),Apply=Bounds(Apply),CloudRoot=Bounds(CloudRootRow),Backup=Bounds(BackupRow),Viewport=Bounds(MainScroll)}
         }));
         File.Move(path+".json.tmp",path+".json",true);
     }

@@ -83,20 +83,26 @@ jobs:
       - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
         with:
           global-json-file: global.json
-      - name: Build locked x64 source and exercise native UI
+      - name: Build locked native x64 source
+        id: native_build
         run: |
           $ErrorActionPreference = 'Stop'
           dotnet build ./ui/ICloudFolderSetup/ICloudFolderSetup.csproj -c Debug -p:Platform=x64 -p:RestoreLockedMode=true
           if ($LASTEXITCODE) { throw 'Native Debug build failed.' }
+          dotnet build ./ui/ICloudFolderSetup/ICloudFolderSetup.csproj -c Release -p:Platform=x64 -p:RestoreLockedMode=true
+          if ($LASTEXITCODE) { throw 'Native Release build failed.' }
+      - name: Exercise native UI behavior, theme, layout and accessibility
+        run: |
+          $ErrorActionPreference = 'Stop'
           & ./tests/Test-WinUI.ps1
           & ./tests/Test-WinUITheme.ps1
           & ./tests/Test-WinUILayout.ps1
           & ./tests/Test-WinUIAccessibility.ps1
-          dotnet build ./ui/ICloudFolderSetup/ICloudFolderSetup.csproj -c Release -p:Platform=x64 -p:RestoreLockedMode=true
-          if ($LASTEXITCODE) { throw 'Native Release build failed.' }
       - name: Verify real high-contrast settings in disposable hosted Windows
+        if: ${{ always() && steps.native_build.outcome == 'success' }}
         run: ./tests/Test-WinUIHighContrast.ps1
       - name: Cross-build native ARM64 source
+        if: ${{ always() && steps.native_build.outcome == 'success' }}
         run: |
           dotnet build ./ui/ICloudFolderSetup/ICloudFolderSetup.csproj -c Release -p:Platform=ARM64 -r win-arm64 -p:RestoreLockedMode=true
           if ($LASTEXITCODE) { throw 'Native ARM64 cross-build failed.' }
