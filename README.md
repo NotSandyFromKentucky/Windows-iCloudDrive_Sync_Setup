@@ -15,7 +15,7 @@ If installation reports changed or incomplete application files, extract a fresh
 
 ## Requirements
 
-- Windows and Windows PowerShell 5.1. The native WinUI package bundles its .NET/Windows App SDK runtime. Explorer entry points use a process-only execution-policy override for the launcher/backend; machine policy is unchanged.
+- 64-bit Windows and Windows PowerShell 5.1. The current native package is x64 and bundles its .NET/Windows App SDK runtime. Native ARM64 execution is not yet certified. Explorer entry points use a process-only execution-policy override for the launcher/backend; machine policy is unchanged.
 - iCloud for Windows signed in with an existing Drive folder for iCloud setup and cloud verification.
 - Reset and backup restore do not require an available iCloud installation. Copying cloud-only files requires the provider to make their contents available.
 
@@ -88,7 +88,7 @@ Application files are copied into unique version directories beneath %LOCALAPPDA
 
 ## Project documentation
 
-The [WinUI 3 migration](docs/WINUI.md) is under development. Source entry points now expect the complete NativeUI payload from the native package. The currently published older release retains its original interface; no release assets have been replaced. Building from source requires the pinned .NET SDK and the native packaging workflow.
+The v2.4.0 release candidate uses the [native WinUI 3 interface](docs/WINUI.md). Source entry points expect the complete NativeUI payload from the native package. The currently published v2.3.1 release retains its original interface; no release assets have been replaced. Building from source requires the pinned .NET SDK and the native packaging workflow. VERSION also sets the native executable and assembly version.
 
 - [Command-line reference](docs/CLI.md)
 - [Architecture and repository structure](docs/CONTEXT.md)

@@ -51,6 +51,12 @@ try{
     & (Join-Path $repo 'tools/Test-ReleasePackage.ps1') -Archive $Archive
     Expand-Archive -LiteralPath $Archive -DestinationPath (Join-Path $fixture 'extracted')
     $package=(Get-ChildItem (Join-Path $fixture 'extracted') -Directory | Select-Object -First 1).FullName
+    $version=(Get-Content -LiteralPath (Join-Path $package 'VERSION') -Raw).Trim()
+    foreach($name in @('ICloudFolderSetup.exe','ICloudFolderSetup.dll')){
+        $metadata=[Diagnostics.FileVersionInfo]::GetVersionInfo((Join-Path $package ('NativeUI/'+$name)))
+        Assert ($metadata.ProductVersion.Split('+')[0] -ceq $version -and $metadata.FileVersion -ceq ($version+'.0')) ('Native version does not match package VERSION: '+$name)
+    }
+    'PASS: native executable and assembly versions match the package VERSION'
     foreach($mode in @('Setup','Reset','Check','Install')){Test-Launcher -Source $package -Mode $mode}
     Import-Module (Join-Path $repo 'ICloudFolderSetup.Install.psm1') -Force
     $previewRoot=Join-Path $fixture 'whatif-installed'

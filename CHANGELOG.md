@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v2.4.0
 
 - Uses desktop-specific Windows App SDK folder/open/save pickers with contextual actions, JSON/text filters and readable save completion. Adds disposable-runner picker interaction coverage.
 

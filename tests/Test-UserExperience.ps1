@@ -101,7 +101,7 @@ public static class SetupAccessibilityProbe {
     try{
         $window.Form.Show();[Windows.Forms.Application]::DoEvents()
         $window.Preview.PerformClick();Wait-Ui {$window.Preview.Enabled}
-        Assert $window.Apply.Enabled 'Copy preview did not enable reviewed copy'
+        Assert $window.Apply.Enabled ('Copy preview did not enable reviewed copy: '+$window.Output.Text)
         $window.Apply.PerformClick()
         Wait-Ui {$window.Progress.Value -eq 1 -and $window.Stop.Enabled}
         $window.Stop.PerformClick()

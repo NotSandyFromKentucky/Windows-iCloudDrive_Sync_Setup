@@ -46,8 +46,9 @@ public static class ICloudPickerDriver
         dialog=null;
     }
     static void Choose(string path){
-        var field=Id(dialog,"1148") ?? Id(dialog,"1152");
-        Assert(field!=null,"Picker filename field missing");object pattern;
+        AutomationElement field=null;
+        Wait(()=>{field=Id(dialog,"FileNameControlHost") ?? Id(dialog,"1148") ?? Id(dialog,"1152");return field!=null && field.Current.IsEnabled;},"Picker filename field unavailable");
+        object pattern;
         if(!field.TryGetCurrentPattern(ValuePattern.Pattern,out pattern)){
             var edit=field.FindFirst(TreeScope.Descendants,new PropertyCondition(AutomationElement.ControlTypeProperty,ControlType.Edit));
             Assert(edit!=null,"Picker filename edit missing");pattern=edit.GetCurrentPattern(ValuePattern.Pattern);

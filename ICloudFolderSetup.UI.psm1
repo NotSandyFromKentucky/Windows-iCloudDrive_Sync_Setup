@@ -109,7 +109,7 @@ function Get-SetupOutcome {
         $message=switch -Regex($Text){
             'nothing will be overwritten|Different source files|File/folder conflict' {'Copy could not start because files conflict. Compare the named files and rename or relocate the conflicting destination yourself, then preview again.';break}
             'registration|registered iCloud|does not match' {'The iCloud folder could not be verified. Choose the folder shown in iCloud settings. Use manual verification only when Windows has no registration; a known mismatch cannot be overridden.';break}
-            'Existing source content requires review' {'Existing files need your decision. Copy them using a separate copy action, or choose Continue without copying existing files, then preview again.';break}
+            'Existing source content requires review' {'Existing files need your decision. Copy them using a separate copy action, or select the option to change locations without copying files, then preview again.';break}
             'backup|\bSID\b|\bschema\b' {'The recovery file could not be used. Choose a trusted before.json file for this Windows account and ensure its original destination folders are available.';break}
             'access.*denied|Access.*denied|permission|Unauthorized' {'Access was denied. Close applications using the files, check folder permissions, then preview again. Do not run as a different Windows account.';break}
             'unavailable|must already exist|does not exist' {'A required folder is unavailable. Reconnect its drive or choose an existing accessible location, then preview again.';break}
