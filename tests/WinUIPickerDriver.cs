@@ -13,6 +13,7 @@ public static class ICloudPickerDriver
     static Process process;
     static AutomationElement window,dialog;
     static string dialogTitle;
+    static string fixtureRoot;
     [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)]
     static extern bool IsWindowVisible(IntPtr handle);
     static void Assert(bool condition,string message){if(!condition)throw new InvalidOperationException(message);}
@@ -48,12 +49,15 @@ public static class ICloudPickerDriver
     static void Choose(string path){
         AutomationElement field=null;
         Wait(()=>{field=Id(dialog,"FileNameControlHost") ?? Id(dialog,"1148") ?? Id(dialog,"1152");return field!=null && field.Current.IsEnabled;},"Picker filename field unavailable");
-        object pattern;
-        if(!field.TryGetCurrentPattern(ValuePattern.Pattern,out pattern)){
-            var edit=field.FindFirst(TreeScope.Descendants,new PropertyCondition(AutomationElement.ControlTypeProperty,ControlType.Edit));
-            Assert(edit!=null,"Picker filename edit missing");pattern=edit.GetCurrentPattern(ValuePattern.Pattern);
-        }
-        ((ValuePattern)pattern).SetValue(path);Invoke(Button("1"));
+        // Modern save dialogs expose a combo host and a separate filename edit.
+        // Set the editable child rather than the host's independent value.
+        var edit=field.Current.ControlType==ControlType.Edit ? field : field.FindFirst(TreeScope.Descendants,new PropertyCondition(AutomationElement.ControlTypeProperty,ControlType.Edit));
+        var value=(ValuePattern)(edit ?? field).GetCurrentPattern(ValuePattern.Pattern);
+        value.SetValue(path);
+        Assert(value.Current.Value==path,"Picker filename edit did not retain the requested path");
+        var commit=Button("1");
+        Console.WriteLine("Choosing picker path: "+path+"; control: "+commit.Current.Name);
+        Invoke(commit);
     }
     static void RegisterProviders(){ClientSettings.RegisterClientSideProviderAssembly(new AssemblyName("UIAutomationClientsideProviders, Version=4.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35"));}
     public static int Main(string[] args){
@@ -63,6 +67,7 @@ public static class ICloudPickerDriver
             Assert(args.Length==2,"Expected repository and fixture paths");
             Assert(ICloudTestDesktop.CurrentName()==Environment.GetEnvironmentVariable("ICLOUD_TEST_DESKTOP") && ICloudTestDesktop.CurrentName()!=ICloudTestDesktop.InputName(),"Picker driver is not on the verified hidden desktop");
             string repo=args[0],fixture=args[1];
+            fixtureRoot=fixture;
             var exe=Path.Combine(repo,@"ui\ICloudFolderSetup\bin\x64\Debug\net10.0-windows10.0.19041.0\win-x64\ICloudFolderSetup.exe");
             process=Process.Start(new ProcessStartInfo(exe,"--source \""+repo+"\""){UseShellExecute=false});
             Wait(()=>ICloudTestDesktop.FindWindowForProcess((uint)process.Id,"iCloud folder setup")!=IntPtr.Zero,"Native app did not start");
@@ -89,7 +94,9 @@ public static class ICloudPickerDriver
             string result=Value("Results");Open("Save","Save folder setup result");Cancel();
             Assert(Directory.GetFiles(fixture,"*.txt",SearchOption.AllDirectories).Length==0,"Cancelled save created a file");
             string saved=Path.Combine(chosen,"result.txt");Open("Save","Save folder setup result");Choose(saved);
-            Wait(()=>File.Exists(saved) && File.ReadAllText(saved)==result,"Save picker did not preserve displayed text");
+            Wait(()=>File.Exists(saved),"Save picker did not create the requested result path");
+            string contents=File.ReadAllText(saved);
+            Assert(contents==result,"Saved result differs from displayed text; expected length "+result.Length+", actual "+contents.Length);
             Wait(()=>Id(window,"OperationStatus").Current.Name.Contains("Result saved"),"Save completion was not announced");
             Console.WriteLine("PASS: save picker cancellation and exact displayed-result contents");
             return 0;
@@ -97,6 +104,8 @@ public static class ICloudPickerDriver
             Console.WriteLine(error);
             try{
                 if(window!=null)Console.WriteLine("Native result: "+Value("Results"));
+                if(window!=null && Id(window,"OperationStatus")!=null)Console.WriteLine("Native status: "+Id(window,"OperationStatus").Current.Name);
+                if(fixtureRoot!=null)foreach(var file in Directory.GetFiles(fixtureRoot,"*",SearchOption.AllDirectories))Console.WriteLine("Fixture file: "+file+"; bytes: "+new FileInfo(file).Length);
                 if(dialog!=null){var nodes=dialog.FindAll(TreeScope.Descendants,Condition.TrueCondition);for(int i=0;i<Math.Min(60,nodes.Count);i++)Console.WriteLine(nodes[i].Current.AutomationId+" | "+nodes[i].Current.Name+" | "+nodes[i].Current.ControlType.ProgrammaticName);}
             }catch(Exception diagnostic){Console.WriteLine("Diagnostic snapshot unavailable: "+diagnostic.Message);}
             return 1;
