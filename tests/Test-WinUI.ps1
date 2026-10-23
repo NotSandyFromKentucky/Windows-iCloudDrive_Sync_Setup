@@ -45,6 +45,12 @@ try{
 [CmdletBinding(SupportsShouldProcess)]
 param([string]$ICloudRoot,[switch]$IncludeMusic,[switch]$Apply,[switch]$VerifiedSyncRoot,[switch]$AllowExistingContent,[switch]$ResetToDefaults,[string]$RestoreBackup)
 if($ICloudRoot -eq 'FAIL'){[Console]::Error.WriteLine('Access is denied to the fixture folder.');exit 1}
+switch($ICloudRoot){
+    'BACKUP-FAIL' {[Console]::Error.WriteLine('The backup SID does not match this account.');exit 1}
+    'ROOT-MISMATCH' {[Console]::Error.WriteLine('The registered iCloud root does not match.');exit 1}
+    'ROLLBACK-FAIL' {[Console]::Error.WriteLine('ROLLBACK INCOMPLETE: retain fixture-before.json.');exit 1}
+    'SOURCE-CONTENT' {[Console]::Error.WriteLine('Existing source content requires review.');exit 1}
+}
 [pscustomobject]@{Root=$ICloudRoot;Apply=[bool]$Apply;DryRun=[bool]$WhatIfPreference;Reset=[bool]$ResetToDefaults;Backup=$RestoreBackup} | ConvertTo-Json -Compress
 Write-Host 'Recovery backup: fixture-before.json'
 if($Apply -and -not $WhatIfPreference){[IO.File]::WriteAllText((Join-Path $PSScriptRoot 'applied.txt'),'fixture only')}
@@ -97,6 +103,18 @@ exit 0
     $text=$results.GetCurrentPattern([Windows.Automation.ValuePattern]::Pattern).Current.Value
     Assert ($text -like '*Access was denied*' -and $text -like '*fixture folder*') ('Error lacks next step or exact affected context: '+$text)
     Wait-For {$preview.Current.HasKeyboardFocus} 'Failed operation did not restore keyboard focus to Preview'
+    foreach($case in @(
+        @{Root='BACKUP-FAIL';Message='*trusted before.json*'},
+        @{Root='ROOT-MISMATCH';Message='*known mismatch cannot be overridden*'},
+        @{Root='ROLLBACK-FAIL';Message='*Recovery needs attention*'},
+        @{Root='SOURCE-CONTENT';Message='*select the option to change locations without copying files*'}
+    )){
+        $root.GetCurrentPattern([Windows.Automation.ValuePattern]::Pattern).SetValue($case.Root)
+        Invoke-Control $preview
+        Wait-For {$preview.Current.IsEnabled -and $results.GetCurrentPattern([Windows.Automation.ValuePattern]::Pattern).Current.Value -like $case.Message} ('Error fixture did not finish: '+$case.Root)
+        $text=$results.GetCurrentPattern([Windows.Automation.ValuePattern]::Pattern).Current.Value
+        Assert ($text -like $case.Message -and -not $apply.Current.IsEnabled) ('Error lost recovery guidance or enabled Apply: '+$text)
+    }
     'PASS: real WinUI controls, Unicode preview, recovery paths, action-specific confirmation, cancellation, fixture apply, repeat gate and actionable errors on hidden desktop'
     Select-Action 'Reset to Windows defaults'
     Assert (-not $apply.Current.IsEnabled) 'Switching action retained a reviewed setup plan'
@@ -118,6 +136,7 @@ exit 0
 [CmdletBinding(SupportsShouldProcess)]
 param([ValidateSet('Start','Check','Cleanup')][string]$Mode)
 [pscustomobject]@{Mode=$Mode;DryRun=[bool]$WhatIfPreference} | ConvertTo-Json -Compress
+if(-not $WhatIfPreference -and $Mode -ne 'Check'){[IO.File]::WriteAllText((Join-Path $PSScriptRoot ($Mode+'.txt')),'fixture only')}
 exit 0
 '@ | Set-Content -LiteralPath (Join-Path $fixture 'tools/Test-ICloudRoundTrip.ps1') -Encoding UTF8
     Select-OrInvoke (Find-Name 'Cloud verification')
@@ -132,8 +151,24 @@ exit 0
         $payload=[regex]::Match($results.GetCurrentPattern([Windows.Automation.ValuePattern]::Pattern).Current.Value,'\{"Mode".*?\}').Value | ConvertFrom-Json
         Assert ($payload.Mode -eq $case.Mode -and $payload.DryRun -eq (-not $case.ReadOnly)) ('Unsafe cloud preview routing: '+$case.Action)
         Assert ($apply.Current.IsEnabled -eq (-not $case.ReadOnly)) ('Incorrect cloud approval state: '+$case.Action)
+        if(-not $case.ReadOnly){
+            $marker=Join-Path (Join-Path $fixture 'tools') ($case.Mode+'.txt')
+            Assert (-not(Test-Path $marker)) 'Cloud preview reached a mutation'
+            Invoke-Control $apply
+            Wait-For {$null -ne (Find-Name 'Cancel')} 'Cloud confirmation did not open'
+            Invoke-Control (Find-Name 'Cancel')
+            Assert (-not(Test-Path $marker)) 'Cancelled cloud confirmation reached a mutation'
+            Invoke-Control $apply
+            $label=if($case.Mode -eq 'Start'){'Create test file'}else{'Remove test file'}
+            Wait-For {$null -ne (Find-Name 'Cancel')} 'Cloud confirmation did not reopen'
+            $condition=New-Object Windows.Automation.AndCondition((New-Object Windows.Automation.PropertyCondition([Windows.Automation.AutomationElement]::NameProperty,$label)),(New-Object Windows.Automation.PropertyCondition([Windows.Automation.AutomationElement]::ControlTypeProperty,[Windows.Automation.ControlType]::Button)))
+            Invoke-Control ($window.FindFirst([Windows.Automation.TreeScope]::Descendants,$condition))
+            Wait-For {$preview.Current.IsEnabled -and (Test-Path $marker)} 'Confirmed cloud action did not reach its fixture'
+            $payload=[regex]::Match($results.GetCurrentPattern([Windows.Automation.ValuePattern]::Pattern).Current.Value,'\{"Mode".*?\}').Value | ConvertFrom-Json
+            Assert ($payload.Mode -eq $case.Mode -and -not $payload.DryRun -and -not $apply.Current.IsEnabled) 'Confirmed cloud action lost its mode or fresh-preview requirement'
+        }
     }
-    'PASS: native cloud create/check/cleanup previews preserve WhatIf and read-only routing'
+    'PASS: native cloud previews, read-only checks, cancellation, confirmed fixture create/cleanup and fresh-preview gating'
     Copy-Item -LiteralPath (Join-Path $repo 'ICloudFolderCopy.psm1') -Destination $fixture
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'fixtures/Copy-CancelWorker.ps1') -Destination (Join-Path $fixture 'Copy-ICloudFolderFiles.ps1')
     $source=Join-Path $fixture 'source';$target=Join-Path $fixture 'target'

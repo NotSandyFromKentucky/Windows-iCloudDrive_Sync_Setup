@@ -20,7 +20,9 @@ try{
         @{Text='Different file already exists; nothing will be overwritten';Expected='*files conflict*'},
         @{Text='ROLLBACK INCOMPLETE';Expected='*Recovery needs attention*'},
         @{Text='Existing source content requires review';Expected='*Copy them using a separate copy action*'},
-        @{Text='Access is denied';Expected='*check folder permissions*'}
+        @{Text='Access is denied';Expected='*check folder permissions*'},
+        @{Text='Backup schema, user SID, or registry key does not match.';Expected='*trusted before.json*'},
+        @{Text='The selected folder does not match your registered iCloud Drive location.';Expected='*known mismatch cannot be overridden*'}
     )){
         $result=Get-SetupOutcome -Action 'Set up iCloud folders' -Phase Apply -ExitCode 1 -Text $case.Text
         Assert ($result.Message -like $case.Expected) ('Unhelpful error: '+$result.Message)

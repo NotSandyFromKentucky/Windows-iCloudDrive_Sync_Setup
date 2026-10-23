@@ -88,7 +88,7 @@ Application files are copied into unique version directories beneath %LOCALAPPDA
 
 ## Project documentation
 
-The v2.4.0 release candidate uses the [native WinUI 3 interface](docs/WINUI.md). Source entry points expect the complete NativeUI payload from the native package. The currently published v2.3.1 release retains its original interface; no release assets have been replaced. Building from source requires the pinned .NET SDK and the native packaging workflow. VERSION also sets the native executable and assembly version.
+The v2.4.0 sources use the [native WinUI 3 interface](docs/WINUI.md). Source entry points expect the complete NativeUI payload from the native package. The v2.3.1 and earlier release archives retain their original interface; no release assets have been replaced. Building from source requires the pinned .NET SDK and the native packaging workflow. VERSION also sets the native executable and assembly version.
 
 - [Command-line reference](docs/CLI.md)
 - [Architecture and repository structure](docs/CONTEXT.md)

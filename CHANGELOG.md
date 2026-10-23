@@ -2,6 +2,8 @@
 
 ## v2.4.0
 
+- Gives backup account/schema mismatches recovery-file guidance and verifies cancelled/confirmed cloud actions against isolated native UI fixtures.
+
 - Reads the native executable version from VERSION and verifies it in extracted packages. Handles BOM-prefixed release policies and single-file legacy policies consistently in Windows PowerShell and PowerShell 7.
 
 - Uses desktop-specific Windows App SDK folder/open/save pickers with contextual actions, JSON/text filters and readable save completion. Adds disposable-runner picker interaction coverage.
