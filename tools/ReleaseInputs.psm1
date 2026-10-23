@@ -2,8 +2,13 @@
 Set-StrictMode -Version Latest
 function Read-ReleaseInputs {
     param([Parameter(Mandatory)][string]$Json)
-    $inputData=$Json | ConvertFrom-Json
-    if($inputData -is [array]){$files=@($inputData);$native=$null}
+    # git show preserves a UTF-8 file's leading BOM in its text output. Unlike
+    # file readers, PowerShell 7's JSON parser does not consume that marker.
+    $normalized=$Json.TrimStart([char]0xFEFF)
+    $inputData=$normalized | ConvertFrom-Json
+    # PowerShell 7 unwraps single-item arrays at the pipeline boundary.
+    # Identify the legacy JSON shape before relying on the parsed CLR type.
+    if($normalized.TrimStart().StartsWith('[')){$files=@($inputData);$native=$null}
     else{
         if($inputData.SchemaVersion -ne 2){throw 'Unsupported release input schema.'}
         $files=@($inputData.Files);$native=$inputData.NativeUI

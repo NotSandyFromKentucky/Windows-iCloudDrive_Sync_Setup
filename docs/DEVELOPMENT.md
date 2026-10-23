@@ -30,6 +30,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-HiddenDeskt
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-ContrastQuery.ps1
 powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File .\tests\Test-SetupUI.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-InstallerIntegrity.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-ReleaseInputs.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-FolderCopy.ps1
 powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File .\tests\Test-UserExperience.ps1
 ~~~

@@ -41,6 +41,7 @@ jobs:
           & ./tests/Test-ContrastQuery.ps1
           & ./tests/Test-SetupUI.ps1
           & ./tests/Test-InstallerIntegrity.ps1
+          & ./tests/Test-ReleaseInputs.ps1
           & ./tests/Test-FolderCopy.ps1
           & ./tests/Test-UserExperience.ps1
   integration:
