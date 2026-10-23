@@ -44,12 +44,12 @@
         <Grid x:Name="CloudRootRow" ColumnSpacing="12">
          <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
          <TextBox x:Name="CloudRoot" Header="iCloud Drive folder" TextChanged="OptionsChanged" AutomationProperties.AutomationId="CloudRoot" />
-         <Button Grid.Column="1" Content="Browse…" VerticalAlignment="Bottom" Click="BrowseRoot" AccessKey="B" />
+         <Button Grid.Column="1" Content="Browse…" VerticalAlignment="Bottom" Click="BrowseRoot" AccessKey="B" AutomationProperties.AutomationId="BrowseRoot" AutomationProperties.Name="Browse for iCloud Drive folder" />
         </Grid>
         <Grid x:Name="BackupRow" ColumnSpacing="12" Visibility="Collapsed">
          <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
          <TextBox x:Name="BackupFile" Header="Recovery backup (before.json)" TextChanged="OptionsChanged" AutomationProperties.AutomationId="BackupFile" />
-         <Button Grid.Column="1" Content="Choose…" VerticalAlignment="Bottom" Click="BrowseBackup" />
+         <Button Grid.Column="1" Content="Choose…" VerticalAlignment="Bottom" Click="BrowseBackup" AutomationProperties.AutomationId="BrowseBackup" AutomationProperties.Name="Choose recovery backup" />
         </Grid>
         <CheckBox x:Name="Music" Content="Include Music" Checked="OptionsChanged" Unchecked="OptionsChanged" />
         <Expander x:Name="Advanced" Header="Advanced options" HorizontalAlignment="Stretch">

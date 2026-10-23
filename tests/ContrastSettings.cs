@@ -10,14 +10,14 @@ public static class ICloudContrastFixture
     [DllImport("user32.dll", EntryPoint="SystemParametersInfoW", SetLastError=true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool Parameters(uint action, uint size, ref HighContrast value, uint flags);
-    [DllImport("kernel32.dll")]
-    private static extern IntPtr LocalFree(IntPtr memory);
     public static State Read()
     {
         var value=new HighContrast { Size=(uint)Marshal.SizeOf(typeof(HighContrast)) };
         if(!Parameters(0x42,value.Size,ref value,0)) throw new Win32Exception(Marshal.GetLastWin32Error());
-        try { return new State { Flags=value.Flags, Scheme=Marshal.PtrToStringUni(value.Scheme) }; }
-        finally { if(value.Scheme!=IntPtr.Zero) LocalFree(value.Scheme); }
+        // Windows owns this stable pointer. Despite the HIGHCONTRASTW documentation,
+        // freeing it corrupts the heap on subsequent queries. Match .NET's interop:
+        // https://source.dot.net/System.Private.Windows.Core/Windows/Win32/PInvokeCore.SystemParametersInfo.cs.html
+        return new State { Flags=value.Flags, Scheme=Marshal.PtrToStringUni(value.Scheme) };
     }
     public static void Write(State state)
     {

@@ -3,7 +3,7 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
-using Windows.Storage.Pickers;
+using Microsoft.Windows.Storage.Pickers;
 
 namespace ICloudFolderSetup;
 
@@ -144,25 +144,22 @@ public sealed partial class MainWindow : Window
     private async void BrowseRoot(object sender,RoutedEventArgs args)
     {
         try {
-            var picker=new FolderPicker();picker.FileTypeFilter.Add("*");
-            WinRT.Interop.InitializeWithWindow.Initialize(picker,WinRT.Interop.WindowNative.GetWindowHandle(this));
+            var picker=new FolderPicker(AppWindow.Id){Title="Choose your iCloud Drive folder",CommitButtonText="Use this folder"};
             if(await picker.PickSingleFolderAsync() is {} folder) CloudRoot.Text=folder.Path;
         }catch(Exception error){ShowError(error);}
     }
     private async void BrowseBackup(object sender,RoutedEventArgs args)
     {
         try {
-            var picker=new FileOpenPicker();picker.FileTypeFilter.Add(".json");
-            WinRT.Interop.InitializeWithWindow.Initialize(picker,WinRT.Interop.WindowNative.GetWindowHandle(this));
+            var picker=new FileOpenPicker(AppWindow.Id){Title="Choose a recovery backup",CommitButtonText="Use recovery backup"};picker.FileTypeFilter.Add(".json");
             if(await picker.PickSingleFileAsync() is {} file) BackupFile.Text=file.Path;
         }catch(Exception error){ShowError(error);}
     }
     private async void SaveResult(object sender,RoutedEventArgs args)
     {
         try {
-            var picker=new FileSavePicker{SuggestedFileName="folder-setup-result"};picker.FileTypeChoices.Add("Text",new[]{".txt"});
-            WinRT.Interop.InitializeWithWindow.Initialize(picker,WinRT.Interop.WindowNative.GetWindowHandle(this));
-            if(await picker.PickSaveFileAsync() is {} file) await File.WriteAllTextAsync(file.Path,Results.Text);
+            var picker=new FileSavePicker(AppWindow.Id){Title="Save folder setup result",SuggestedFileName="folder-setup-result",DefaultFileExtension=".txt",ShowOverwritePrompt=true};picker.FileTypeChoices.Add("Text",new[]{".txt"});
+            if(await picker.PickSaveFileAsync() is {} file){await File.WriteAllTextAsync(file.Path,Results.Text);SetStatus("Result saved",file.Path,InfoBarSeverity.Success);}
         }catch(Exception error){ShowError(error);}
     }
     private void SetBusy(bool value,SetupOptions options)

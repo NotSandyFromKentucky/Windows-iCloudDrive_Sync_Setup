@@ -27,6 +27,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-ICloudFolde
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-ExplorerLauncher.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Diagnostics.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-HiddenDesktop.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-ContrastQuery.ps1
 powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File .\tests\Test-SetupUI.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-InstallerIntegrity.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-FolderCopy.ps1

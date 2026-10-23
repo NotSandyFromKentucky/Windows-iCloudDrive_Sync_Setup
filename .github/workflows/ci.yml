@@ -38,6 +38,7 @@ jobs:
           & ./tests/Test-ExplorerLauncher.ps1
           & ./tests/Test-Diagnostics.ps1
           & ./tests/Test-HiddenDesktop.ps1
+          & ./tests/Test-ContrastQuery.ps1
           & ./tests/Test-SetupUI.ps1
           & ./tests/Test-InstallerIntegrity.ps1
           & ./tests/Test-FolderCopy.ps1
@@ -101,6 +102,9 @@ jobs:
       - name: Verify real high-contrast settings in disposable hosted Windows
         if: ${{ always() && steps.native_build.outcome == 'success' }}
         run: ./tests/Test-WinUIHighContrast.ps1
+      - name: Verify owned native folder, backup and save pickers
+        if: ${{ always() && steps.native_build.outcome == 'success' }}
+        run: ./tests/Test-WinUIPickers.ps1
       - name: Cross-build native ARM64 source
         if: ${{ always() && steps.native_build.outcome == 'success' }}
         run: |
