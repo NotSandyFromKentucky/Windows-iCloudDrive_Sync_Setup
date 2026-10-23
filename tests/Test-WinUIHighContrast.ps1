@@ -36,6 +36,17 @@ try{
     & (Join-Path $PSScriptRoot 'Test-WinUITheme.ps1')
     if(@(Compare-Object -ReferenceObject $baseline -DifferenceObject @(Read-Palettes)).Count){throw 'Native theme palettes differ from the original after contrast restoration.'}
     Write-Output 'PASS: post-restoration native palettes match the original'
-    if($restored.Flags -ne $original.Flags -or $restored.Scheme -cne $original.Scheme){throw ('High-contrast settings were not restored exactly. Original: '+($original|ConvertTo-Json -Compress)+'; restored: '+($restored|ConvertTo-Json -Compress))}
+    if($restored.Flags -ne $original.Flags){throw 'High-contrast flags were not restored exactly.'}
+    # On a fresh hosted account Windows initializes an empty default scheme on
+    # first activation. It does not return to empty when contrast is disabled.
+    # Require exact preservation of every pre-existing name, and never allow an
+    # empty-name exception when contrast was originally enabled. Flags and the
+    # original Light/Dark palettes must still match exactly in every case.
+    if($restored.Scheme -cne $original.Scheme){
+        if(($original.Flags -band 1) -ne 0 -or -not [string]::IsNullOrEmpty($original.Scheme) -or [string]::IsNullOrEmpty($restored.Scheme)){
+            throw ('High-contrast scheme was not restored. Original: '+($original|ConvertTo-Json -Compress)+'; restored: '+($restored|ConvertTo-Json -Compress))
+        }
+        Write-Output ('Windows initialized the previously empty inactive contrast scheme: '+$restored.Scheme)
+    }
 }
 Write-Output ('PASS: disposable '+$environment+' high-contrast palette and restored-settings render')

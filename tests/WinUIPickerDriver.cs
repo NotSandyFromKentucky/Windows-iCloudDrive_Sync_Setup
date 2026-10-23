@@ -2,6 +2,7 @@ using System;
 using System.Diagnostics;
 using System.IO;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Windows.Automation;
 
@@ -12,6 +13,8 @@ public static class ICloudPickerDriver
     static Process process;
     static AutomationElement window,dialog;
     static string dialogTitle;
+    [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)]
+    static extern bool IsWindowVisible(IntPtr handle);
     static void Assert(bool condition,string message){if(!condition)throw new InvalidOperationException(message);}
     static void Wait(Func<bool> condition,string message){
         var end=DateTime.UtcNow.AddSeconds(30);
@@ -22,17 +25,26 @@ public static class ICloudPickerDriver
         throw new TimeoutException(message);
     }
     static AutomationElement Id(AutomationElement parent,string id){return parent.FindFirst(TreeScope.Descendants,new PropertyCondition(AutomationElement.AutomationIdProperty,id));}
+    static AutomationElement Button(string id){return dialog.FindFirst(TreeScope.Descendants,new AndCondition(new PropertyCondition(AutomationElement.AutomationIdProperty,id),new PropertyCondition(AutomationElement.ControlTypeProperty,ControlType.Button)));}
     static AutomationElement Name(string name){return window.FindFirst(TreeScope.Descendants,new PropertyCondition(AutomationElement.NameProperty,name));}
     static void Invoke(AutomationElement control){Assert(control!=null,"Missing picker control");((InvokePattern)control.GetCurrentPattern(InvokePattern.Pattern)).Invoke();}
     static string Value(string id){var control=Id(window,id);return control==null ? null : ((ValuePattern)control.GetCurrentPattern(ValuePattern.Pattern)).Current.Value;}
     static IntPtr DialogHandle(){return ICloudTestDesktop.FindWindowForProcess((uint)process.Id,dialogTitle);}
     static void Open(string button,string title){
         dialogTitle=title;Invoke(Id(window,button));
-        Wait(()=>DialogHandle()!=IntPtr.Zero,"Owned picker missing on hidden desktop: "+title);
+        Wait(()=>DialogHandle()!=IntPtr.Zero && IsWindowVisible(DialogHandle()),"Owned picker missing on hidden desktop: "+title);
         dialog=AutomationElement.FromHandle(DialogHandle());
-        Wait(()=>Id(dialog,"2")!=null,"Picker Cancel unavailable");
+        Wait(()=>Button("2")!=null && Button("2").Current.IsEnabled,"Picker Cancel unavailable");
     }
-    static void Cancel(){Invoke(Id(dialog,"2"));Wait(()=>DialogHandle()==IntPtr.Zero,"Picker cancel did not close its dialog");dialog=null;}
+    static void Cancel(){
+        var cancel=Button("2");
+        Console.WriteLine("Cancelling picker: "+dialogTitle+"; control: "+cancel.Current.Name);
+        Invoke(cancel);
+        // A common dialog can retain its HWND after dismissal. Visibility and the
+        // owner's enabled state distinguish dismissal from an open modal window.
+        Wait(()=>{var handle=DialogHandle();return (handle==IntPtr.Zero || !IsWindowVisible(handle)) && window.Current.IsEnabled;},"Picker cancel did not dismiss its dialog and re-enable its owner");
+        dialog=null;
+    }
     static void Choose(string path){
         var field=Id(dialog,"1148") ?? Id(dialog,"1152");
         Assert(field!=null,"Picker filename field missing");object pattern;
@@ -40,7 +52,7 @@ public static class ICloudPickerDriver
             var edit=field.FindFirst(TreeScope.Descendants,new PropertyCondition(AutomationElement.ControlTypeProperty,ControlType.Edit));
             Assert(edit!=null,"Picker filename edit missing");pattern=edit.GetCurrentPattern(ValuePattern.Pattern);
         }
-        ((ValuePattern)pattern).SetValue(path);Invoke(Id(dialog,"1"));
+        ((ValuePattern)pattern).SetValue(path);Invoke(Button("1"));
     }
     static void RegisterProviders(){ClientSettings.RegisterClientSideProviderAssembly(new AssemblyName("UIAutomationClientsideProviders, Version=4.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35"));}
     public static int Main(string[] args){
