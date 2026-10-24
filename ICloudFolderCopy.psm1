@@ -133,6 +133,22 @@ function Get-CopyPlan {
     }
     $plan.ToArray()
 }
+function Test-CopyPlansEqual {
+    param([object[]]$Expected,[object[]]$Actual)
+    if($Expected.Count -ne $Actual.Count){return $false}
+    $ordinal=[StringComparer]::Ordinal
+    for($i=0;$i -lt $Expected.Count;$i++){
+        $left=$Expected[$i];$right=$Actual[$i]
+        # Keep every field in sync with Get-CopyPlan. Ordinal text equality
+        # rejects spelling/case changes and distinguishes null from empty hashes.
+        if($left.Directory -ne $right.Directory -or
+            -not $ordinal.Equals($left.Source,$right.Source) -or
+            -not $ordinal.Equals($left.Destination,$right.Destination) -or
+            -not $ordinal.Equals($left.Hash,$right.Hash) -or
+            -not $ordinal.Equals($left.Action,$right.Action)){return $false}
+    }
+    return $true
+}
 function Invoke-ICloudFolderCopy {
     [CmdletBinding(SupportsShouldProcess)]
     param([string]$ICloudRoot="$env:USERPROFILE\iCloudDrive",[switch]$ResetToDefaults,[switch]$IncludeMusic,[switch]$VerifiedSyncRoot,[switch]$Apply,[string]$CancelEventName,[switch]$ProgressEvents,[hashtable]$FolderPaths=@{})
@@ -154,8 +170,10 @@ function Invoke-ICloudFolderCopy {
         if(-not $PSCmdlet.ShouldProcess('Displayed file-copy plan','Copy missing files, verify SHA-256 and retain every original')){return}
         # Rebuild before the first write to reject changed source/destination content.
         $fresh=@(Get-CopyPlan $pairs)
-        if(($fresh | ConvertTo-Json -Depth 5 -Compress) -cne ($plan | ConvertTo-Json -Depth 5 -Compress)){throw 'Files changed after planning. Preview again.'}
-        $copied=0;$completed=0;$total=@($plan | Where-Object {-not $_.Directory}).Count
+        if(-not(Test-CopyPlansEqual -Expected $plan -Actual $fresh)){throw 'Files changed after planning. Preview again.'}
+        $fresh=$null
+        $copied=0;$completed=0;$total=0
+        foreach($entry in $plan){if(-not $entry.Directory){$total++}}
         try{
             foreach($entry in $plan){
                 Test-CopyCancellation

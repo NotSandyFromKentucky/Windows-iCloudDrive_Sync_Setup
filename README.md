@@ -64,7 +64,7 @@ Missing files are copied and verified with SHA-256; identical files are skipped 
 
 Unavailable sources, overlapping trees, encrypted files, junctions, symbolic links and unsupported reparse points are refused. Reading Windows Cloud Files placeholders may download content, and destination copies may synchronize. Live iCloud hydration/copy is not certified by fixture tests.
 
-Apply rebuilds the plan before writing and rechecks hashes. Active file changes can stop copying. Originals and folder settings remain unchanged on failure; partial destination copies are retained for inspection. Copy progress reports the current file and verified file count. **Stop after current file** finishes copying and verifying the current file, then stops before the next. Planning can stop between files. A large file or cloud download can delay stopping. Completed copies remain; preview again before resuming. Folder-setting operations cannot be cancelled mid-write. This is a content merge, not a metadata-complete archival backup.
+Apply rebuilds the plan before writing and rechecks hashes. Changes in file content, paths, or destination state between planning passes stop copying. Originals and folder settings remain unchanged on failure; partial destination copies are retained for inspection. Copy progress reports the current file and verified file count. **Stop after current file** finishes copying and verifying the current file, then stops before the next. Planning can stop between files. A large file or cloud download can delay stopping. Completed copies remain; preview again before resuming. Folder-setting operations cannot be cancelled mid-write. This is a content merge, not a metadata-complete archival backup.
 
 ## Backups and recovery
 

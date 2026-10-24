@@ -70,6 +70,59 @@ try{
     Assert ([IO.File]::ReadAllText((Join-Path $source 'a.txt')) -ceq 'original') 'Failure changed source'
     Assert (Test-Path (Join-Path $target2 'a.txt')) 'Partial-copy failure fixture did not exercise a completed destination write'
     'PASS: partial-copy failures retain originals and completed destination files for inspection'
+    # Change real fixture content exactly between the initial and fresh plans.
+    # Every case must stop before creating any destination directory/file.
+    $changes=@(
+        @{Name='added source';Edit={param($S,$T) [IO.File]::WriteAllText((Join-Path $S 'new.txt'),'new')}},
+        @{Name='changed source';Edit={param($S,$T) [IO.File]::WriteAllText((Join-Path $S 'a.txt'),'changed')}},
+        @{Name='removed source';Edit={param($S,$T) [IO.File]::Delete((Join-Path $S 'a.txt'))}},
+        @{Name='renamed source';Edit={param($S,$T) [IO.File]::Move((Join-Path $S 'a.txt'),(Join-Path $S 'renamed.txt'))}},
+        @{Name='source became directory';Edit={param($S,$T) $path=Join-Path $S 'a.txt';[IO.File]::Delete($path);$null=[IO.Directory]::CreateDirectory($path)}},
+        @{Name='newly identical destination';Edit={param($S,$T) $null=[IO.Directory]::CreateDirectory($T);[IO.File]::WriteAllText((Join-Path $T 'a.txt'),'original')}}
+    )
+    foreach($change in $changes){
+        $raceRoot=Join-Path $fixture ('replan-'+[guid]::NewGuid().ToString('N'))
+        $raceSource=Join-Path $raceRoot 'source';$raceTarget=Join-Path $raceRoot 'destination'
+        $null=[IO.Directory]::CreateDirectory($raceSource)
+        [IO.File]::WriteAllText((Join-Path $raceSource 'a.txt'),'original')
+        [IO.File]::WriteAllText((Join-Path $raceSource 'untouched.txt'),'retain this')
+        $racePath=Join-Path $raceRoot 'RaceCopy.psm1'
+        Copy-Item -LiteralPath (Join-Path $repo 'ICloudFolderCopy.psm1') -Destination $racePath
+        $raceModule=Import-Module $racePath -Force -PassThru
+        try{
+            & $raceModule {
+                param($S,$T,$Edit)
+                $script:RaceSource=$S;$script:RaceTarget=$T;$script:Edit=$Edit;$script:PlanCalls=0
+                $script:OriginalPlan=(Get-Item Function:Get-CopyPlan).ScriptBlock
+                function script:Get-CopyPairs {[pscustomobject]@{Source=$script:RaceSource;Destination=$script:RaceTarget}}
+                function script:Get-CopyPlan {
+                    param([object[]]$Pairs)
+                    $script:PlanCalls++
+                    if($script:PlanCalls -eq 2){& $script:Edit $script:RaceSource $script:RaceTarget}
+                    & $script:OriginalPlan $Pairs
+                }
+            } $raceSource $raceTarget $change.Edit
+            Fail {& $raceModule {Invoke-ICloudFolderCopy -Apply}} 'Files changed after planning'
+            Assert ([IO.File]::ReadAllText((Join-Path $raceSource 'untouched.txt')) -ceq 'retain this') 'Replan failure changed retained source content'
+            Assert (-not(Test-Path (Join-Path $raceTarget 'untouched.txt'))) 'Replan drift allowed a destination copy'
+            if($change.Name -ne 'newly identical destination'){Assert (-not(Test-Path $raceTarget)) 'Replan drift created a destination directory'}
+        }finally{Remove-Module $raceModule -Force}
+    }
+    'PASS: source content/path/type changes and newly identical destinations invalidate the fresh plan before copying'
+    & $module {
+        $entry=[pscustomobject]@{Source=('C:\fixture\'+[char]0xE9);Destination='C:\target';Directory=$true;Hash=$null;Action='Copy'}
+        $same=[pscustomobject]@{Source=$entry.Source;Destination=$entry.Destination;Directory=$true;Hash=$null;Action='Copy'}
+        if(-not(Test-CopyPlansEqual @($entry) @($same))){throw 'Identical plans rejected'}
+        $same.Hash=''
+        if(Test-CopyPlansEqual @($entry) @($same)){throw 'Null and empty directory hashes compared equal'}
+        $same.Hash=$null;$same.Source='C:\fixture\e'+[char]0x301
+        if(Test-CopyPlansEqual @($entry) @($same)){throw 'Different Unicode path spellings compared equal'}
+        $same.Source=$entry.Source.ToUpperInvariant()
+        if(Test-CopyPlansEqual @($entry) @($same)){throw 'Case-only path changes compared equal'}
+        $other=[pscustomobject]@{Source='C:\other';Destination='C:\target2';Directory=$false;Hash=('A'*64);Action='Copy'}
+        if(Test-CopyPlansEqual @($entry,$other) @($other,$entry)){throw 'Reordered plans compared equal'}
+    }
+    'PASS: plan comparison preserves ordering, nullable hashes and exact Unicode path identity'
     $core=Import-Module (Join-Path $repo 'ICloudFolders.psm1') -Force -PassThru
     $cloud=Join-Path $fixture 'cloud';$null=[IO.Directory]::CreateDirectory($cloud)
     & $core {

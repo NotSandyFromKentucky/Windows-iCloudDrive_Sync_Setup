@@ -2,6 +2,8 @@
 
 ## v2.4.0
 
+- Reduces copy-preflight allocations by comparing plan fields directly, releasing the duplicate plan after validation and counting files without a filtered array. Revalidation retains exact path spelling, entry order and nullable hashes, with fixture coverage for changes between planning passes.
+
 - Shows the native window while folder definitions load asynchronously, with a loading status and disabled actions until initialization finishes.
 
 - Shows proposed folder destinations and icons by default. Advanced mode adds per-folder path editing and browsing within iCloud Drive, with shared setup/copy/check validation and fresh-preview gating.
