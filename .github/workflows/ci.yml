@@ -79,7 +79,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Build locked Rust snapshot and run safety fixtures
+      - name: Verify hosted isolation and build locked Rust snapshot
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
@@ -87,9 +87,17 @@ jobs:
           if ($isolation -ne 'GitHubHosted') { throw 'Expected a GitHub-hosted Windows runner.' }
           rustc --version
           $build = ./tools/Build-NativeBackend.ps1 -Test
-          ./tests/Test-NativeCopyPlan.ps1 -WorkerPath $build.WorkerPath
-          ./tests/Test-NativeBackend.ps1 -WorkerPath $build.WorkerPath
-          ./tests/Test-NativeCloudFiles.ps1 -Snapshot $build.Snapshot
+          $environment = "ICLOUD_BACKEND_WORKER=$($build.WorkerPath)`nICLOUD_BACKEND_SNAPSHOT=$($build.Snapshot)`n"
+          [IO.File]::AppendAllText($env:GITHUB_ENV, $environment, (New-Object Text.UTF8Encoding($false)))
+      - name: Verify native copy-plan parity
+        shell: powershell
+        run: ./tests/Test-NativeCopyPlan.ps1 -WorkerPath $env:ICLOUD_BACKEND_WORKER
+      - name: Verify guarded native registry parity
+        shell: powershell
+        run: ./tests/Test-NativeBackend.ps1 -WorkerPath $env:ICLOUD_BACKEND_WORKER
+      - name: Verify guarded Cloud Files hydration
+        shell: powershell
+        run: ./tests/Test-NativeCloudFiles.ps1 -Snapshot $env:ICLOUD_BACKEND_SNAPSHOT
       - name: Build Rust UI and verify fixture parity and package behavior
         shell: powershell
         run: |
