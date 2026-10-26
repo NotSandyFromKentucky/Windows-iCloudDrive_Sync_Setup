@@ -89,12 +89,15 @@ try{
         foreach($name in $resetMap.Keys){$relative=$expected|Where-Object {$_.value_name -ceq $name}|Select-Object -First 1;$folder=if($relative.relative_path -eq 'Videos\Captures'){'Captures'}else{$relative.relative_path};$default=$expectedDefaults|Where-Object {$_.folder -ceq $folder}|Select-Object -First 1;Assert ([string]::Equals($resetMap[$name],$default.path,[StringComparison]::OrdinalIgnoreCase)) ('Windows reset mapping changed for '+$name)}
         'PASS: Rust resolves Windows default folders through SHGetKnownFolderPath without writes'
     }
-    $expectedCurrent=@();$currentPathFailures=@()
-    $currentIds=& $module { Get-WindowsKnownFolderIds }
-    foreach($folder in $currentIds.Keys){
-        try{$expectedCurrent+=,[pscustomobject]@{folder=$folder;path=(Get-WindowsCurrentFolderPath -Id $currentIds[$folder])}}
-        catch{$currentPathFailures+=,[pscustomobject]@{folder=$folder;message=$_.Exception.Message}}
-    }
+    $currentPathResults=@(& $module {
+        $known=Get-WindowsKnownFolderIds
+        foreach($folder in $known.Keys){
+            try{[pscustomobject]@{folder=$folder;path=(Get-WindowsCurrentFolderPath -Id $known[$folder]);message=$null}}
+            catch{[pscustomobject]@{folder=$folder;path=$null;message=$_.Exception.Message}}
+        }
+    })
+    $expectedCurrent=@($currentPathResults|Where-Object {$null -ne $_.path}|Select-Object folder,path)
+    $currentPathFailures=@($currentPathResults|Where-Object {$null -eq $_.path}|Select-Object folder,message)
     if($currentPathFailures.Count){
         $nativeCurrentFailure=Invoke-Worker '{"version":1,"operation":"resolve"}' $false
         $nativeMessage=[string]$nativeCurrentFailure[-1].message
