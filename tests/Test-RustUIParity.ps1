@@ -22,6 +22,14 @@ function Cancel-Picker {
     [RustUIProbe]::Send($dialog,0x0111,[IntPtr]2,[IntPtr]::Zero)|Out-Null
     Wait-For {[RustUIProbe]::Dialog($process.Id) -eq [IntPtr]::Zero} 'Owned picker did not close after cancellation'
 }
+function Select-PickerFolder([int]$Id,[string]$Path) {
+    Post-Click $Id
+    Wait-For {$script:dialog=[RustUIProbe]::Dialog($process.Id);$dialog -ne [IntPtr]::Zero -and [RustUIProbe]::IsWindowVisible($dialog)} 'Owned folder picker did not become visible for selection'
+    $handle=$script:dialog.ToInt64().ToString([Globalization.CultureInfo]::InvariantCulture)
+    $output=& $accessibilityProbe '--select-folder' $handle $process.Id $Path
+    Assert ($LASTEXITCODE -eq 0) ('Owned folder picker selection probe failed: '+($output -join ' '))
+    Wait-For {([RustUIProbe]::Dialog($process.Id) -eq [IntPtr]::Zero -or -not [RustUIProbe]::IsWindowVisible([RustUIProbe]::Dialog($process.Id))) -and [RustUIProbe]::IsWindowEnabled($script:window)} 'Selected folder picker did not dismiss'
+}
 function Confirm([bool]$Approve){
     [RustUIProbe]::PostMessage((Control 3),0x00f5,[IntPtr]::Zero,[IntPtr]::Zero)|Out-Null
     Wait-For {$script:dialog=[RustUIProbe]::Dialog($script:process.Id);$script:dialog -ne [IntPtr]::Zero} 'Owned action confirmation missing'
@@ -97,6 +105,10 @@ try{
     if($dpi -eq 96){
         Post-Click 117;Cancel-Picker
         Assert ([RustUIProbe]::Text((Control 100)) -ceq $drive) 'Cancelling the root folder picker changed the selected path'
+        $pickedRoot=Join-Path $fixture ('Picked Root '+[char]0xe9);$null=[IO.Directory]::CreateDirectory($pickedRoot)
+        Select-PickerFolder 117 $pickedRoot
+        Wait-For {([RustUIProbe]::Text((Control 100)) -ceq $pickedRoot)} 'Root picker did not apply the selected Unicode folder'
+        $drive=$pickedRoot
     }
     Click 101;Click 102
     $custom=Join-Path $drive 'Custom Desktop'
@@ -105,6 +117,10 @@ try{
         Assert ([RustUIProbe]::IsWindowVisible((Control 300))) 'Advanced folder picker was not shown with custom paths enabled'
         Post-Click 300;Cancel-Picker
         Assert ([RustUIProbe]::Text((Control 200)) -ceq $custom) 'Cancelling a per-folder picker changed its custom path'
+        $pickedCustom=Join-Path $drive ('Picked Desktop '+[char]0xe9);$null=[IO.Directory]::CreateDirectory($pickedCustom)
+        Select-PickerFolder 300 $pickedCustom
+        Wait-For {([RustUIProbe]::Text((Control 200)) -ceq $pickedCustom)} 'Advanced picker did not apply the selected Unicode folder'
+        $custom=$pickedCustom
     }
     Click 1;Wait-Status '*Fixture completed*'
     Assert ([RustUIProbe]::IsWindowEnabled((Control 3))) 'Successful preview did not enable Apply'
@@ -112,8 +128,18 @@ try{
     Assert ($captured.Root -ceq $drive -and $captured.FolderPaths.Desktop -ceq $custom -and $captured.FolderPaths.Captures -ceq (Join-Path $drive 'Videos\Captures')) 'Unicode/custom mapping transport changed'
     Confirm $false
     Assert ((Get-Content (Join-Path $fixture 'requests.jsonl') -Tail 1|ConvertFrom-Json).Phase -eq 'Preview') 'Cancelled confirmation started Apply'
-    [RustUIProbe]::SetText((Control 200),(Join-Path $drive 'Changed Desktop'))
-    Assert (-not [RustUIProbe]::IsWindowEnabled((Control 3))) 'Path edit retained stale review'
+    if($dpi -eq 96){
+        $changedCustom=Join-Path $drive ('Changed Desktop '+[char]0xe9);$null=[IO.Directory]::CreateDirectory($changedCustom)
+        Select-PickerFolder 300 $changedCustom
+        Wait-For {([RustUIProbe]::Text((Control 200)) -ceq $changedCustom)} 'Second advanced picker selection did not update its path'
+        Assert (-not [RustUIProbe]::IsWindowEnabled((Control 3))) 'Picker selection retained stale review'
+        Click 1;Wait-Status '*Fixture completed*'
+        $captured=Get-Content (Join-Path $fixture 'requests.jsonl') -Tail 1|ConvertFrom-Json
+        Assert ($captured.FolderPaths.Desktop -ceq $changedCustom) 'Re-preview did not transport the newly selected folder'
+    }else{
+        [RustUIProbe]::SetText((Control 200),(Join-Path $drive 'Changed Desktop'))
+        Assert (-not [RustUIProbe]::IsWindowEnabled((Control 3))) 'Path edit retained stale review'
+    }
     Set-Content (Join-Path $fixture 'mode.txt') 'normal'
     foreach($index in @(0,1,2,3,4,6,8)){
         Choose $index
