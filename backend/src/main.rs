@@ -818,8 +818,10 @@ fn registered_roots(sid: &str) -> Result<Vec<String>> {
         if !name.to_ascii_lowercase().starts_with("iclouddrive!") {
             continue;
         }
+        // Open the child relative to the enumerated manager handle. Reopening
+        // this full HKLM path can miss an existing provider child on Windows.
         let path = format!("{name}\\UserSyncRoots");
-        let Some(values) = open_key(HKEY_LOCAL_MACHINE, &path, KEY_QUERY_VALUE)? else {
+        let Some(values) = open_key(manager.0, &path, KEY_QUERY_VALUE)? else {
             continue;
         };
         entries.push((name, registry_string(values.0, sid)?));
