@@ -11,7 +11,17 @@ if(-not $env:ICLOUD_TEST_DESKTOP){
 if(& (Join-Path $PSScriptRoot 'Enter-TestDesktop.ps1') -ScriptPath $PSCommandPath){return}
 $isolation=& (Join-Path $PSScriptRoot 'Assert-IsolatedEnvironment.ps1')
 if($isolation -notin @('GitHubHosted','WindowsSandbox')){throw 'Native backend integration tests require a disposable Windows environment.'}
-function Assert($Value,[string]$Message){if(-not $Value){throw $Message}}
+function Assert($Value,[string]$Message){
+    if(-not $Value){
+        $safeMessage=$Message
+        if($safeMessage -like 'Unexpected result:*' -or $safeMessage -match '(?i)(?:[a-z]:\\|\\\\)'){
+            $safeMessage='A native backend assertion failed; result or path details were withheld.'
+        }
+        $safeMessage=$safeMessage -replace '[\r\n]',' ' -replace '%','%25' -replace ':','%3A' -replace ',','%2C'
+        Write-Output "::error title=Native backend assertion::$safeMessage"
+        throw 'Native backend assertion failed.'
+    }
+}
 function Invoke-Worker([string]$Request,[bool]$Success=$true){
     $info=New-Object Diagnostics.ProcessStartInfo
     $info.FileName=$WorkerPath;$info.UseShellExecute=$false;$info.CreateNoWindow=$true
