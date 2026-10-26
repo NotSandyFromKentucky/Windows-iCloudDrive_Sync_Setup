@@ -93,10 +93,19 @@ jobs:
         shell: powershell
         run: ./tests/Test-NativeCopyPlan.ps1 -WorkerPath $env:ICLOUD_BACKEND_WORKER
       - name: Verify guarded native registry parity
+        id: native_registry
         shell: powershell
         run: ./tests/Test-NativeBackend.ps1 -WorkerPath $env:ICLOUD_BACKEND_WORKER
+      - name: Ensure redacted backend failure label exists
+        if: always() && steps.native_registry.outcome == 'failure'
+        shell: powershell
+        run: |
+          $path = Join-Path $env:RUNNER_TEMP 'ICloudNativeBackendAssertion.txt'
+          if (-not (Test-Path -LiteralPath $path)) {
+            [IO.File]::WriteAllText($path, 'Guarded parity failed before a redacted assertion label was recorded.', (New-Object Text.UTF8Encoding($false)))
+          }
       - name: Retain redacted native assertion label
-        if: always()
+        if: always() && steps.native_registry.outcome == 'failure'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: native-backend-assertion
