@@ -28,9 +28,16 @@ try{
     try{
         $stdout=$process.StandardOutput.ReadToEndAsync();$stderr=$process.StandardError.ReadToEndAsync()
         $process.WaitForExit()
-        $stdout.Result | Out-Host
-        $stderr.Result | Out-Host
-        if($process.ExitCode -ne 0){throw 'The guarded Cloud Files hydration probe failed.'}
+        if($process.ExitCode -ne 0){
+            foreach($output in @($stdout.Result,$stderr.Result)){
+                $safeOutput=[regex]::Replace($output,'(?i)(?:[a-z]:\\|\\\\)[^\r\n]*','[path details withheld]')
+                $lines=@($safeOutput -split '\r?\n' | Where-Object {$_})
+                if($lines.Count -gt 40){$lines=$lines[-40..-1]}
+                foreach($line in $lines){Write-Output $line}
+            }
+            throw ('The guarded Cloud Files hydration probe failed (Cargo exit code '+$process.ExitCode+').')
+        }
+        Write-Output 'PASS: guarded Cloud Files hydration tests completed'
     }finally{$process.Dispose()}
 }finally{
     $env:CARGO_TARGET_DIR=$oldTarget

@@ -99,15 +99,22 @@ try{
         $nativeCurrentFailure=Invoke-Worker '{"version":1,"operation":"resolve"}' $false
         $nativeMessage=[string]$nativeCurrentFailure[-1].message
         $matchingFailure=$false
+        $comparisonDetails=New-Object 'System.Collections.Generic.List[string]'
         foreach($failure in $currentPathFailures){
-            $hresultMatch=[regex]::Match($failure.message,'HRESULT\s+(-?\d+)')
-            if(-not $hresultMatch.Success){continue}
-            $hresultValue=[int64]::Parse($hresultMatch.Groups[1].Value,[Globalization.CultureInfo]::InvariantCulture)
-            $hresultBits=$hresultValue -band 4294967295
+            $hresultMatch=[regex]::Match($failure.message,'HRESULT\s+(0x[0-9A-Fa-f]{8}|-?\d+)')
+            if(-not $hresultMatch.Success){$comparisonDetails.Add("$($failure.folder)=unparsed PowerShell HRESULT");continue}
+            $hresultText=$hresultMatch.Groups[1].Value
+            if($hresultText.StartsWith('0x',[StringComparison]::OrdinalIgnoreCase)){$hresultBits=[Convert]::ToUInt32($hresultText.Substring(2),16)}
+            else{$hresultValue=[int64]::Parse($hresultText,[Globalization.CultureInfo]::InvariantCulture);$hresultBits=[uint32]($hresultValue -band 4294967295)}
             $hresultHex='0x'+('{0:X8}' -f $hresultBits)
-            if($nativeMessage -like "*Cannot resolve the Windows current folder for $($failure.folder)*" -and $nativeMessage -like "*HRESULT $hresultHex*"){$matchingFailure=$true;break}
+            $nativeMatch=[regex]::Match($nativeMessage,'Cannot resolve the Windows current folder for (?<folder>[^:]+): SHGetKnownFolderPath failed \(HRESULT (?<hresult>0x[0-9A-Fa-f]{8})\)\.')
+            $nativeFolder=if($nativeMatch.Success){$nativeMatch.Groups['folder'].Value}else{'unparsed'}
+            $nativeHresult=if($nativeMatch.Success){'0x'+$nativeMatch.Groups['hresult'].Value.Substring(2).ToUpperInvariant()}else{'unparsed'}
+            $comparisonDetails.Add("PowerShell $($failure.folder)=$hresultHex; Rust $nativeFolder=$nativeHresult")
+            if($nativeMatch.Success -and [string]::Equals($nativeFolder,$failure.folder,[StringComparison]::OrdinalIgnoreCase) -and [string]::Equals($nativeHresult,$hresultHex,[StringComparison]::OrdinalIgnoreCase)){$matchingFailure=$true;break}
         }
-        Assert $matchingFailure 'Rust current-folder resolution did not match PowerShell when Windows could not resolve a Known Folder'
+        $details=($comparisonDetails -join '; ')
+        Assert $matchingFailure ('Rust current-folder resolution did not match PowerShell when Windows could not resolve a Known Folder. '+$details)
         'PASS: Rust and PowerShell both fail closed for unavailable current Known Folder paths'
     }else{
         $nativeCurrent=(Invoke-Worker '{"version":1,"operation":"resolve"}')[0]
