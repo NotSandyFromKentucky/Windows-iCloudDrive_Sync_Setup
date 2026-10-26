@@ -47,7 +47,8 @@ use windows_sys::Win32::{
         },
         SystemInformation::GetSystemTime,
         Threading::{
-            CreateMutexW, GetCurrentProcess, OpenProcessToken, ReleaseMutex, WaitForSingleObject,
+            CreateMutexW, GetCurrentProcess, OpenEventW, OpenProcessToken, ReleaseMutex,
+            WaitForSingleObject,
         },
     },
 };
@@ -160,6 +161,34 @@ enum Request {
         include_music: bool,
         #[serde(default)]
         folder_paths: BTreeMap<String, PathBuf>,
+    },
+    CopyPreview {
+        version: u32,
+        root: PathBuf,
+        #[serde(default)]
+        reset_to_defaults: bool,
+        #[serde(default)]
+        include_music: bool,
+        #[serde(default)]
+        verified_sync_root: bool,
+        #[serde(default)]
+        folder_paths: BTreeMap<String, PathBuf>,
+    },
+    CopyApply {
+        version: u32,
+        root: PathBuf,
+        #[serde(default)]
+        reset_to_defaults: bool,
+        #[serde(default)]
+        include_music: bool,
+        #[serde(default)]
+        verified_sync_root: bool,
+        #[serde(default)]
+        folder_paths: BTreeMap<String, PathBuf>,
+        #[serde(default)]
+        confirmed: bool,
+        preview_token: String,
+        cancellation_event: String,
     },
     SetupPreview {
         version: u32,
@@ -356,6 +385,21 @@ impl<'de> Deserialize<'de> for BackupRecord {
 struct CopyPair {
     source: PathBuf,
     destination: PathBuf,
+}
+
+#[derive(Serialize)]
+struct CopyReview {
+    operation: &'static str,
+    root: String,
+    reset_to_defaults: bool,
+    include_music: bool,
+    verified_sync_root: bool,
+    review_gates_passed: bool,
+    root_registered: Option<bool>,
+    registered_roots: Vec<String>,
+    folder_paths: BTreeMap<String, PathBuf>,
+    pairs: Vec<CopyPair>,
+    entries: Vec<Entry>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -1745,6 +1789,8 @@ fn copy_pairs(
     root: &Path,
     include_music: bool,
     custom: &BTreeMap<String, PathBuf>,
+    applying: bool,
+    verified_sync_root: bool,
 ) -> Result<Vec<CopyPair>> {
     let (root, _) = folder_targets(map, root, include_music, custom)?;
     if !fs::metadata(&root).is_ok_and(|meta| meta.is_dir()) {
@@ -1762,12 +1808,106 @@ fn copy_pairs(
             "The selected folder does not match your registered iCloud Drive location.".into(),
         );
     }
+    if applying && registered.is_empty() && !verified_sync_root {
+        return Err("Windows has no iCloud registration. Verify the active folder in iCloud settings before copying.".into());
+    }
     let values = read_folder_values(map, include_music)?;
     let paths = values
         .into_iter()
         .filter_map(|(name, value)| value.data.map(|data| (name, data)))
         .collect();
     derive_copy_pairs(map, &root, include_music, custom, &paths)
+}
+
+fn copy_pairs_to_defaults(map: &[Mapping]) -> Result<Vec<CopyPair>> {
+    let values = read_folder_values(map, true)?;
+    let mut pairs = Vec::new();
+    let mut unique = BTreeSet::new();
+    for item in map {
+        let Some(raw) = values
+            .get(&item.value_name)
+            .and_then(|value| value.data.as_deref())
+        else {
+            continue;
+        };
+        let source = normalize_local_path(Path::new(raw))?;
+        let destination = normalize_local_path(Path::new(&known_folder_path(
+            &item.known_folder_id,
+            0x4600,
+        )?))?;
+        if OrdinalPath::new(&source)? == OrdinalPath::new(&destination)? {
+            continue;
+        }
+        if unique.insert((OrdinalPath::new(&source)?, OrdinalPath::new(&destination)?)) {
+            pairs.push(CopyPair {
+                source,
+                destination,
+            });
+        }
+    }
+    Ok(pairs)
+}
+
+fn copy_review(
+    map: &[Mapping],
+    root: &Path,
+    reset_to_defaults: bool,
+    include_music: bool,
+    verified_sync_root: bool,
+    folder_paths: &BTreeMap<String, PathBuf>,
+    applying: bool,
+) -> Result<CopyReview> {
+    let (normalized_root, pairs, registered, root_registered) = if reset_to_defaults {
+        if !folder_paths.is_empty() {
+            return Err("Custom folder paths cannot replace Windows default locations.".into());
+        }
+        (
+            PathBuf::new(),
+            copy_pairs_to_defaults(map)?,
+            Vec::new(),
+            None,
+        )
+    } else {
+        let (normalized_root, _) = folder_targets(map, root, include_music, folder_paths)?;
+        let pairs = copy_pairs(
+            map,
+            &normalized_root,
+            include_music,
+            folder_paths,
+            applying,
+            verified_sync_root,
+        )?;
+        let registered = registered_roots(&user_sid()?)?;
+        let root_text = text(&normalized_root)?;
+        let root_registered = registered
+            .iter()
+            .any(|candidate| paths_equal(candidate, &root_text));
+        (normalized_root, pairs, registered, Some(root_registered))
+    };
+    let entries = plan_entries(&pairs)?;
+    Ok(CopyReview {
+        operation: if reset_to_defaults {
+            "copy_to_windows_defaults"
+        } else {
+            "copy_to_icloud"
+        },
+        root: if reset_to_defaults {
+            String::new()
+        } else {
+            text(&normalized_root)?
+        },
+        reset_to_defaults,
+        include_music: include_music || reset_to_defaults,
+        verified_sync_root,
+        review_gates_passed: reset_to_defaults
+            || root_registered == Some(true)
+            || verified_sync_root,
+        root_registered,
+        registered_roots: registered,
+        folder_paths: folder_paths.clone(),
+        pairs,
+        entries,
+    })
 }
 
 fn folder_label(item: &Mapping) -> String {
@@ -3214,6 +3354,320 @@ fn plan_entries(pairs: &[CopyPair]) -> Result<Vec<Entry>> {
     Ok(entries)
 }
 
+struct CopyCancellation(HANDLE);
+impl Drop for CopyCancellation {
+    fn drop(&mut self) {
+        // SAFETY: this wrapper owns the event handle returned by OpenEventW.
+        unsafe { CloseHandle(self.0) };
+    }
+}
+
+fn open_copy_cancellation(name: &str) -> Result<CopyCancellation> {
+    let Some(suffix) = name.strip_prefix("Local\\ICloudCopy-") else {
+        return Err("Invalid copy cancellation channel.".into());
+    };
+    if suffix.len() != 32 || !suffix.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("Invalid copy cancellation channel.".into());
+    }
+    let event = unsafe { OpenEventW(0x0010_0000, 0, wide(name).as_ptr()) };
+    if event.is_null() {
+        return Err("Cannot open the copy cancellation channel.".into());
+    }
+    Ok(CopyCancellation(event))
+}
+
+fn copy_cancellation_requested(event: &CopyCancellation) -> Result<bool> {
+    match unsafe { WaitForSingleObject(event.0, 0) } {
+        WAIT_OBJECT_0 => Ok(true),
+        WAIT_TIMEOUT => Ok(false),
+        WAIT_FAILED => Err(format!(
+            "Cannot check the copy cancellation channel (Windows error {}).",
+            unsafe { GetLastError() }
+        )),
+        status => Err(format!("Unexpected cancellation status {status}.")),
+    }
+}
+
+fn emit_copy_progress(
+    output: &mut impl Write,
+    stage: &str,
+    path: &str,
+    completed: usize,
+    total: usize,
+) -> Result<()> {
+    output
+        .write_all(b"@@ICloudProgress:")
+        .map_err(|error| error.to_string())?;
+    serde_json::to_writer(
+        &mut *output,
+        &serde_json::json!({"Stage":stage,"File":path,"Completed":completed,"Total":total}),
+    )
+    .map_err(|error| error.to_string())?;
+    output.write_all(b"\n").map_err(|error| error.to_string())?;
+    output.flush().map_err(|error| error.to_string())
+}
+
+struct CopyInput {
+    data: Win32ReadHandle,
+    before: BY_HANDLE_FILE_INFORMATION,
+    placeholder: Option<Win32ReadHandle>,
+}
+
+fn open_copy_input(path: &Path) -> Result<CopyInput> {
+    use std::os::windows::ffi::OsStrExt;
+    guarded_copy_metadata(path)?;
+    let path_tag = cloud_file_reparse_tag(path)?;
+    let wide_path: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let placeholder = if is_cloud_file_reparse_tag(path_tag) {
+        let handle = unsafe {
+            CreateFileW(
+                wide_path.as_ptr(),
+                FILE_GENERIC_READ,
+                FILE_SHARE_READ,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                FILE_FLAG_OPEN_REPARSE_POINT,
+                std::ptr::null_mut(),
+            )
+        };
+        if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+            return Err(format!(
+                "Cannot reopen Cloud Files placeholder {} (Windows error {}).",
+                path.display(),
+                unsafe { GetLastError() }
+            ));
+        }
+        let handle = Win32ReadHandle(handle);
+        let tag = handle_file_tag(handle.0)?;
+        let mut info = BY_HANDLE_FILE_INFORMATION::default();
+        if unsafe { GetFileInformationByHandle(handle.0, &mut info) } == 0
+            || tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT == 0
+            || !is_cloud_file_reparse_tag(tag.ReparseTag)
+            || info.dwFileAttributes
+                & (FILE_ATTRIBUTE_ENCRYPTED | FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_DEVICE)
+                != 0
+        {
+            return Err("The source changed or is no longer a Cloud Files placeholder.".into());
+        }
+        Some((handle, info))
+    } else {
+        None
+    };
+    let data_handle = unsafe {
+        CreateFileW(
+            wide_path.as_ptr(),
+            FILE_GENERIC_READ,
+            FILE_SHARE_READ,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            if placeholder.is_some() {
+                0
+            } else {
+                FILE_FLAG_OPEN_REPARSE_POINT
+            },
+            std::ptr::null_mut(),
+        )
+    };
+    if data_handle.is_null() || data_handle == INVALID_HANDLE_VALUE {
+        return Err(format!(
+            "Cannot open source {} for a guarded copy (Windows error {}).",
+            path.display(),
+            unsafe { GetLastError() }
+        ));
+    }
+    let data = Win32ReadHandle(data_handle);
+    let mut before = BY_HANDLE_FILE_INFORMATION::default();
+    if unsafe { GetFileType(data_handle) } != FILE_TYPE_DISK
+        || unsafe { GetFileInformationByHandle(data_handle, &mut before) } == 0
+        || before.dwFileAttributes
+            & (FILE_ATTRIBUTE_ENCRYPTED | FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_DEVICE)
+            != 0
+    {
+        return Err("Copy source is not a regular, unencrypted disk file.".into());
+    }
+    if let Some((_placeholder_handle, placeholder_info)) = &placeholder {
+        let tag = handle_file_tag(data_handle)?;
+        if tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+            && !is_cloud_file_reparse_tag(tag.ReparseTag)
+        {
+            return Err("Cloud Files data resolved to an unsupported reparse point.".into());
+        }
+        if !stable_file_identity(placeholder_info, &before) {
+            return Err("Cloud Files source changed while opening its data stream.".into());
+        }
+        let placeholder = placeholder.map(|(handle, _)| handle);
+        Ok(CopyInput {
+            data,
+            before,
+            placeholder,
+        })
+    } else {
+        if before.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err("Copy refuses a source that changed into a reparse point.".into());
+        }
+        Ok(CopyInput {
+            data,
+            before,
+            placeholder: None,
+        })
+    }
+}
+
+fn verify_copy_input(path: &Path, input: &CopyInput) -> Result<()> {
+    let mut after = BY_HANDLE_FILE_INFORMATION::default();
+    if unsafe { GetFileInformationByHandle(input.data.0, &mut after) } == 0
+        || !stable_file_identity(&input.before, &after)
+    {
+        return Err(format!(
+            "Copy source changed while being read: {}.",
+            path.display()
+        ));
+    }
+    if let Some(placeholder) = &input.placeholder {
+        let mut placeholder_after = BY_HANDLE_FILE_INFORMATION::default();
+        let tag = handle_file_tag(placeholder.0)?;
+        if unsafe { GetFileInformationByHandle(placeholder.0, &mut placeholder_after) } == 0
+            || !stable_file_identity(&input.before, &placeholder_after)
+            || !is_cloud_file_reparse_tag(tag.ReparseTag)
+        {
+            return Err(format!(
+                "Cloud Files source changed while being read: {}.",
+                path.display()
+            ));
+        }
+    }
+    guarded_copy_metadata(path)?;
+    Ok(())
+}
+
+fn apply_copy_review(
+    review: &CopyReview,
+    cancellation: &CopyCancellation,
+    output: &mut impl Write,
+) -> Result<serde_json::Value> {
+    let entries = &review.entries;
+    let total = entries.iter().filter(|entry| !entry.directory).count();
+    let mut completed = 0usize;
+    let mut copied = 0usize;
+    let provider = CngSha256Provider::new()?;
+    let mut buffer = vec![0; 64 * 1024];
+    for entry in entries {
+        if copy_cancellation_requested(cancellation)? {
+            return Ok(
+                serde_json::json!({"version":1,"type":"copy_apply","copied":copied,"completed":completed,"total":total,"cancelled":true}),
+            );
+        }
+        let source = Path::new(&entry.source);
+        let destination = Path::new(&entry.destination);
+        validate_path(source)?;
+        validate_path(destination)?;
+        if entry.directory {
+            match guarded_copy_metadata(destination)? {
+                Some(metadata) if metadata.is_dir() => continue,
+                Some(_) => {
+                    return Err(format!(
+                        "Destination changed to a file: {}",
+                        destination.display()
+                    ));
+                }
+                None => {
+                    validate_path(destination)?;
+                    fs::create_dir(destination).map_err(|error| {
+                        format!(
+                            "Cannot create destination directory {}: {error}",
+                            destination.display()
+                        )
+                    })?;
+                    if !guarded_copy_metadata(destination)?
+                        .is_some_and(|metadata| metadata.is_dir())
+                    {
+                        return Err(format!(
+                            "Created destination is not a safe directory: {}",
+                            destination.display()
+                        ));
+                    }
+                }
+            }
+            continue;
+        }
+        emit_copy_progress(
+            output,
+            "Copying and verifying",
+            &entry.source,
+            completed,
+            total,
+        )?;
+        if hash(source, &provider, &mut buffer)? != entry.hash.as_deref().unwrap_or_default() {
+            return Err(format!(
+                "Source changed after review: {}. No source files were removed.",
+                source.display()
+            ));
+        }
+        match guarded_copy_metadata(destination)? {
+            Some(metadata) if metadata.is_file() => {
+                if hash(destination, &provider, &mut buffer)?
+                    != entry.hash.as_deref().unwrap_or_default()
+                {
+                    return Err(format!(
+                        "Destination changed after review: {}. Nothing was overwritten.",
+                        destination.display()
+                    ));
+                }
+                completed += 1;
+                emit_copy_progress(output, "Verified", &entry.source, completed, total)?;
+                continue;
+            }
+            Some(_) => {
+                return Err(format!(
+                    "Destination changed to a folder: {}",
+                    destination.display()
+                ));
+            }
+            None => {}
+        }
+        let mut input = open_copy_input(source)?;
+        let mut target = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(destination)
+            .map_err(|error| {
+                format!(
+                    "Cannot create destination {} without overwriting: {error}",
+                    destination.display()
+                )
+            })?;
+        io::copy(&mut input.data, &mut target).map_err(|error| {
+            format!(
+                "Copy stopped at {}: {error}. The partial destination is retained for inspection.",
+                destination.display()
+            )
+        })?;
+        target.flush().map_err(|error| {
+            format!(
+                "Cannot flush destination {}: {error}. The destination is retained for inspection.",
+                destination.display()
+            )
+        })?;
+        drop(target);
+        verify_copy_input(source, &input)?;
+        drop(input);
+        if hash(destination, &provider, &mut buffer)? != entry.hash.as_deref().unwrap_or_default()
+            || hash(source, &provider, &mut buffer)? != entry.hash.as_deref().unwrap_or_default()
+        {
+            return Err(format!(
+                "Copy verification failed for {}. The destination is retained and the original remains unchanged.",
+                destination.display()
+            ));
+        }
+        copied += 1;
+        completed += 1;
+        emit_copy_progress(output, "Verified", &entry.source, completed, total)?;
+    }
+    Ok(
+        serde_json::json!({"version":1,"type":"copy_apply","copied":copied,"completed":completed,"total":total,"cancelled":false}),
+    )
+}
+
 fn emit_plan(pairs: &[CopyPair], output: &mut impl Write) -> Result<usize> {
     // Nothing is emitted until every source, destination and conflict has passed preflight.
     let entries = plan_entries(pairs)?;
@@ -3264,7 +3718,10 @@ fn run(input: impl Read, output: &mut impl Write) -> Result<bool> {
         serde_json::from_slice(&bytes).map_err(|e| format!("Invalid request: {e}"))?;
     let mut read_only = !matches!(
         &request,
-        Request::SetupApply { .. } | Request::ResetApply { .. } | Request::RestoreApply { .. }
+        Request::CopyApply { .. }
+            | Request::SetupApply { .. }
+            | Request::ResetApply { .. }
+            | Request::RestoreApply { .. }
     );
     let version = match &request {
         Request::Metadata { version }
@@ -3276,6 +3733,8 @@ fn run(input: impl Read, output: &mut impl Write) -> Result<bool> {
         | Request::PlanMany { version, .. }
         | Request::CopyPlan { version, .. }
         | Request::CopyPairs { version, .. }
+        | Request::CopyPreview { version, .. }
+        | Request::CopyApply { version, .. }
         | Request::SetupPreview { version, .. }
         | Request::SetupApply { version, .. }
         | Request::ResetPreview { version, .. }
@@ -3346,7 +3805,7 @@ fn run(input: impl Read, output: &mut impl Write) -> Result<bool> {
             ..
         } => {
             let _settings_mutex = acquire_settings_mutex()?;
-            let pairs = copy_pairs(&map, &root, include_music, &folder_paths)?;
+            let pairs = copy_pairs(&map, &root, include_music, &folder_paths, false, false)?;
             emit_copy_plan(&pairs, output)?;
         }
         Request::CopyPairs {
@@ -3356,11 +3815,78 @@ fn run(input: impl Read, output: &mut impl Write) -> Result<bool> {
             ..
         } => {
             let _settings_mutex = acquire_settings_mutex()?;
-            let pairs = copy_pairs(&map, &root, include_music, &folder_paths)?;
+            let pairs = copy_pairs(&map, &root, include_music, &folder_paths, false, false)?;
             emit(
                 output,
                 &serde_json::json!({"version":1,"type":"copy_pairs","pairs":pairs}),
             )?;
+        }
+        Request::CopyPreview {
+            root,
+            reset_to_defaults,
+            include_music,
+            verified_sync_root,
+            folder_paths,
+            ..
+        } => {
+            let _settings_mutex = acquire_settings_mutex()?;
+            let review = copy_review(
+                &map,
+                &root,
+                reset_to_defaults,
+                include_music,
+                verified_sync_root,
+                &folder_paths,
+                false,
+            )?;
+            let token = approval_token(&review)?;
+            emit(
+                output,
+                &serde_json::json!({"version":1,"type":"copy_preview","preview":review,"approval_token":token}),
+            )?;
+        }
+        Request::CopyApply {
+            root,
+            reset_to_defaults,
+            include_music,
+            verified_sync_root,
+            folder_paths,
+            confirmed,
+            preview_token: expected_token,
+            cancellation_event,
+            ..
+        } => {
+            read_only = false;
+            let result = (|| {
+                if !confirmed {
+                    return Err("Explicit confirmation is required before copying files.".into());
+                }
+                let cancellation = open_copy_cancellation(&cancellation_event)?;
+                let _settings_mutex = acquire_settings_mutex()?;
+                let fresh = copy_review(
+                    &map,
+                    &root,
+                    reset_to_defaults,
+                    include_music,
+                    verified_sync_root,
+                    &folder_paths,
+                    true,
+                )?;
+                if approval_token(&fresh)? != expected_token {
+                    return Err("Files, folder settings or destinations changed after review. Preview again before copying.".into());
+                }
+                apply_copy_review(&fresh, &cancellation, output)
+            })();
+            match result {
+                Ok(outcome) => emit(output, &outcome)?,
+                Err(error) => {
+                    emit(
+                        output,
+                        &serde_json::json!({"version":1,"type":"result","ok":false,"read_only":false,"message":error}),
+                    )?;
+                    return Ok(false);
+                }
+            }
         }
         Request::SetupPreview {
             root,
@@ -3661,6 +4187,112 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
+    struct SignalAfterVerified {
+        event: HANDLE,
+        flushes: usize,
+    }
+    impl Write for SignalAfterVerified {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            self.flushes += 1;
+            if self.flushes == 2 {
+                // SAFETY: the test owns this live manual-reset event handle.
+                assert_ne!(
+                    unsafe { windows_sys::Win32::System::Threading::SetEvent(self.event) },
+                    0
+                );
+            }
+            Ok(())
+        }
+    }
+
+    fn copy_apply_fixture() -> (PathBuf, CopyReview) {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "ICloudNativeCopyApply-{}-{unique}",
+            std::process::id()
+        ));
+        let source = root.join("source");
+        let destination = root.join("destination");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(source.join("first.txt"), b"first original").unwrap();
+        fs::write(source.join("second.txt"), b"second original").unwrap();
+        let provider = CngSha256Provider::new().unwrap();
+        let mut buffer = vec![0; 64 * 1024];
+        let source_text = text(&source).unwrap();
+        let destination_text = text(&destination).unwrap();
+        let first_source = source.join("first.txt");
+        let second_source = source.join("second.txt");
+        let first_destination = destination.join("first.txt");
+        let second_destination = destination.join("second.txt");
+        let entries = vec![
+            Entry {
+                source: source_text.clone(),
+                destination: destination_text.clone(),
+                directory: true,
+                hash: None,
+                action: "CreateDirectory",
+            },
+            Entry {
+                source: text(&first_source).unwrap(),
+                destination: text(&first_destination).unwrap(),
+                directory: false,
+                hash: Some(hash(&first_source, &provider, &mut buffer).unwrap()),
+                action: "Copy",
+            },
+            Entry {
+                source: text(&second_source).unwrap(),
+                destination: text(&second_destination).unwrap(),
+                directory: false,
+                hash: Some(hash(&second_source, &provider, &mut buffer).unwrap()),
+                action: "Copy",
+            },
+        ];
+        let pairs = vec![CopyPair {
+            source,
+            destination,
+        }];
+        (
+            root,
+            CopyReview {
+                operation: "copy_to_icloud",
+                root: String::new(),
+                reset_to_defaults: false,
+                include_music: false,
+                verified_sync_root: true,
+                review_gates_passed: true,
+                root_registered: Some(true),
+                registered_roots: Vec::new(),
+                folder_paths: BTreeMap::new(),
+                pairs,
+                entries,
+            },
+        )
+    }
+
+    fn create_copy_cancel_event(initially_signaled: bool) -> (String, HANDLE) {
+        let ticks = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let name = format!("Local\\ICloudCopy-{ticks:032x}");
+        let handle = unsafe {
+            windows_sys::Win32::System::Threading::CreateEventW(
+                std::ptr::null_mut(),
+                1,
+                i32::from(initially_signaled),
+                wide(&name).as_ptr(),
+            )
+        };
+        assert!(!handle.is_null());
+        (name, handle)
+    }
+
     #[test]
     fn check_folder_resolution_aggregates_failures_and_skips_optional_music() {
         let map = vec![
@@ -3949,6 +4581,69 @@ mod tests {
         );
     }
 
+    #[test]
+    fn copy_apply_finishes_a_file_then_cancels_at_the_next_boundary() {
+        let (root, review) = copy_apply_fixture();
+        let source = root.join("source");
+        let destination = root.join("destination");
+        let (name, owner) = create_copy_cancel_event(false);
+        let cancellation = open_copy_cancellation(&name).unwrap();
+        let mut output = SignalAfterVerified {
+            event: owner,
+            flushes: 0,
+        };
+
+        let outcome = apply_copy_review(&review, &cancellation, &mut output).unwrap();
+        assert_eq!(
+            output.flushes, 2,
+            "expected copy-start and first-file completion progress"
+        );
+        assert!(
+            copy_cancellation_requested(&cancellation).unwrap(),
+            "event was not signaled"
+        );
+        assert_eq!(outcome["cancelled"], true);
+        assert_eq!(outcome["copied"], 1);
+        assert_eq!(
+            fs::read(destination.join("first.txt")).unwrap(),
+            b"first original"
+        );
+        assert!(!destination.join("second.txt").exists());
+        assert_eq!(
+            fs::read(source.join("first.txt")).unwrap(),
+            b"first original"
+        );
+        assert_eq!(
+            fs::read(source.join("second.txt")).unwrap(),
+            b"second original"
+        );
+        drop(cancellation);
+        unsafe { CloseHandle(owner) };
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn copy_apply_never_overwrites_a_destination_that_changed_after_review() {
+        let (root, review) = copy_apply_fixture();
+        let destination = root.join("destination");
+        fs::create_dir(&destination).unwrap();
+        fs::write(destination.join("first.txt"), b"keeper bytes").unwrap();
+        let (name, owner) = create_copy_cancel_event(false);
+        let cancellation = open_copy_cancellation(&name).unwrap();
+        unsafe { CloseHandle(owner) };
+        let mut output = Vec::new();
+
+        let error = apply_copy_review(&review, &cancellation, &mut output).unwrap_err();
+        assert!(error.contains("Nothing was overwritten"));
+        assert_eq!(
+            fs::read(destination.join("first.txt")).unwrap(),
+            b"keeper bytes"
+        );
+        assert!(!destination.join("second.txt").exists());
+        drop(cancellation);
+        fs::remove_dir_all(root).unwrap();
+    }
+
     fn same_stored_value(
         left: Option<&StoredFolderValue>,
         right: Option<&StoredFolderValue>,
@@ -4194,6 +4889,7 @@ mod tests {
             r#"{"version":1,"operation":"setup_apply","root":"C:\\Fixture\\Drive","preview_token":""}"#,
             r#"{"version":1,"operation":"reset_apply","preview_token":""}"#,
             r#"{"version":1,"operation":"restore_apply","path":"C:\\Fixture\\before.json","preview_token":""}"#,
+            r#"{"version":1,"operation":"copy_apply","root":"C:\\Fixture\\Drive","confirmed":false,"preview_token":"","cancellation_event":"Local\\ICloudCopy-0123456789abcdef0123456789abcdef"}"#,
         ];
         for request in requests {
             let mut output = Vec::new();

@@ -40,7 +40,7 @@ function Invoke-Worker([string]$Request,[bool]$Success=$true){
         $bytes=[Text.Encoding]::UTF8.GetBytes($Request)
         $process.StandardInput.BaseStream.Write($bytes,0,$bytes.Length);$process.StandardInput.Close()
         if(-not $process.WaitForExit(30000)){$process.Kill();throw 'Worker timeout'}
-        $lines=@($out.Result -split '\r?\n' | Where-Object {$_} | ForEach-Object {$_ | ConvertFrom-Json})
+        $lines=@($out.Result -split '\r?\n' | Where-Object {$_ -and $_ -notlike '@@ICloudProgress:*'} | ForEach-Object {$_ | ConvertFrom-Json})
         Assert ($lines.Count -gt 0) 'Worker returned no protocol records'
         Assert ($lines[-1].type -eq 'result') 'Missing terminal result'
         Assert ($lines[-1].ok -eq $Success) ('Unexpected result: '+$out.Result)
@@ -503,6 +503,54 @@ try{
             Assert ($actualValue.Exists -and [string]::Equals($actualValue.Data,$path,[StringComparison]::OrdinalIgnoreCase)) ('Native setup Apply did not write the reviewed folder value '+$item.value_name)
         }
         'PASS: native setup Apply writes reviewed values and persists a validated account-bound recovery backup'
+
+        $copySource=Join-Path $fixture 'copy-source-documents';$null=[IO.Directory]::CreateDirectory($copySource)
+        $copyName='native-copy-'+[guid]::NewGuid().ToString('N')+'.txt'
+        $copySourceFile=Join-Path $copySource $copyName
+        $copyDestinationFile=Join-Path (Join-Path $applyRoot 'Documents') $copyName
+        [IO.File]::WriteAllText($copySourceFile,'native copy source remains intact')
+        $shellValues=[Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders',$true)
+        Assert ($null -ne $shellValues) 'Current-user shell-folder registry key is unavailable for the isolated copy fixture'
+        try{$shellValues.SetValue('Personal',$copySource,[Microsoft.Win32.RegistryValueKind]::ExpandString)}finally{$shellValues.Dispose()}
+        $copyPreviewRequest=@{version=1;operation='copy_preview';root=$applyRoot;include_music=$true;verified_sync_root=$false;folder_paths=@{}}|ConvertTo-Json -Compress
+        $copyPreview=Invoke-Worker $copyPreviewRequest
+        $copyApproval=[string]$copyPreview[0].approval_token
+        $copyEntries=@($copyPreview[0].preview.entries)
+        Assert ($copyApproval -match '^[A-Fa-f0-9]{64}$' -and $copyPreview[0].preview.review_gates_passed) 'Registered native copy preview was not ready to apply'
+        Assert (@($copyEntries|Where-Object {$_.source -ceq $copySourceFile -and $_.destination -ceq $copyDestinationFile -and $_.action -ceq 'Copy'}).Count -eq 1) 'Native copy preview omitted the expected reviewed file'
+        [IO.File]::WriteAllText($copySourceFile,'changed after native copy review')
+        $staleCopyEvent='Local\ICloudCopy-'+[guid]::NewGuid().ToString('N')
+        $staleCopyHandle=New-Object Threading.EventWaitHandle($false,[Threading.EventResetMode]::ManualReset,$staleCopyEvent)
+        try{
+            $staleCopyRequest=@{version=1;operation='copy_apply';root=$applyRoot;include_music=$true;verified_sync_root=$false;folder_paths=@{};confirmed=$true;preview_token=$copyApproval;cancellation_event=$staleCopyEvent}|ConvertTo-Json -Compress
+            $staleCopy=Invoke-Worker $staleCopyRequest $false
+            Assert ($staleCopy[-1].message -like '*changed after review*') 'Native copy Apply accepted a stale file-review token'
+            Assert (-not(Test-Path -LiteralPath $copyDestinationFile)) 'Stale native copy Apply created a destination file'
+        }finally{$staleCopyHandle.Dispose()}
+        $copyPreview=Invoke-Worker $copyPreviewRequest
+        $copyApproval=[string]$copyPreview[0].approval_token
+        $cancelCopyEvent='Local\ICloudCopy-'+[guid]::NewGuid().ToString('N')
+        $cancelCopyHandle=New-Object Threading.EventWaitHandle($true,[Threading.EventResetMode]::ManualReset,$cancelCopyEvent)
+        try{
+            $cancelCopyRequest=@{version=1;operation='copy_apply';root=$applyRoot;include_music=$true;verified_sync_root=$false;folder_paths=@{};confirmed=$true;preview_token=$copyApproval;cancellation_event=$cancelCopyEvent}|ConvertTo-Json -Compress
+            $cancelledCopy=Invoke-Worker $cancelCopyRequest
+            $cancelledResult=@($cancelledCopy|Where-Object type -ceq 'copy_apply')
+            Assert ($cancelledResult.Count -eq 1 -and $cancelledResult[0].cancelled -and $cancelledResult[0].copied -eq 0) 'Native copy cancellation did not stop before its first file boundary'
+            Assert (-not(Test-Path -LiteralPath $copyDestinationFile)) 'Cancelled native copy created a destination file'
+        }finally{$cancelCopyHandle.Dispose()}
+        $copyPreview=Invoke-Worker $copyPreviewRequest
+        $copyApproval=[string]$copyPreview[0].approval_token
+        $applyCopyEvent='Local\ICloudCopy-'+[guid]::NewGuid().ToString('N')
+        $applyCopyHandle=New-Object Threading.EventWaitHandle($false,[Threading.EventResetMode]::ManualReset,$applyCopyEvent)
+        try{
+            $applyCopyRequest=@{version=1;operation='copy_apply';root=$applyRoot;include_music=$true;verified_sync_root=$false;folder_paths=@{};confirmed=$true;preview_token=$copyApproval;cancellation_event=$applyCopyEvent}|ConvertTo-Json -Compress
+            $copied=Invoke-Worker $applyCopyRequest
+            $copyResult=@($copied|Where-Object type -ceq 'copy_apply')
+            Assert ($copyResult.Count -eq 1 -and -not $copyResult[0].cancelled -and $copyResult[0].copied -eq 1 -and $copyResult[0].completed -eq 1) 'Native copy Apply returned no verified-file result'
+            Assert ((Get-FileHash -LiteralPath $copySourceFile).Hash -ceq (Get-FileHash -LiteralPath $copyDestinationFile).Hash) 'Native copy Apply did not preserve the reviewed bytes'
+            Assert ([IO.File]::ReadAllText($copySourceFile) -ceq 'changed after native copy review') 'Native copy Apply modified the original file'
+        }finally{$applyCopyHandle.Dispose()}
+        'PASS: native copy Apply binds the complete plan, refuses stale review, stops cooperatively and verifies destination hashes while retaining originals'
 
         if(-not $defaultQueryError){
             $resetApplyPreview=Invoke-Worker '{"version":1,"operation":"reset_preview","allow_existing_content":true}'

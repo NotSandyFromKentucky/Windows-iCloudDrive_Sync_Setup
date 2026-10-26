@@ -209,6 +209,19 @@ try{
     Assert ($process.WaitForExit(10000) -and $process.ExitCode -eq 0) 'Native-check UI did not close cleanly'
     $process.Dispose();$process=$null
     'PASS: Rust UI routes configuration Check through the Rust worker and renders its structured result without PowerShell'
+
+    $script:process=Start-UIWithEnvironment '--mode Setup' @{ICLOUD_SCRIPT_ROOT=$fixture;ICLOUD_NATIVE_BACKEND=$BackendWorkerPath};$script:window=[IntPtr]::Zero
+    Wait-For {$script:window=[RustUIProbe]::Find($process.Id);$window -ne [IntPtr]::Zero -and [RustUIProbe]::IsWindowVisible($window) -and (Control 110) -ne [IntPtr]::Zero} 'Native-copy UI window missing'
+    Choose 4
+    Click 1;Wait-Status '*File-copy preview*'
+    Assert ([RustUIProbe]::IsWindowVisible((Control 115))) 'Native Rust copy preview did not render its structured plan table'
+    Assert ([RustUIProbe]::IsWindowEnabled((Control 3))) 'Validated Windows-default copy preview did not enable reviewed Apply'
+    Assert (-not(Test-Path (Join-Path $fixture 'requests.jsonl'))) 'Native Rust copy preview used the PowerShell bridge'
+    [RustUIProbe]::PostMessage($window,0x0010,[IntPtr]::Zero,[IntPtr]::Zero)|Out-Null
+    Assert ($process.WaitForExit(10000) -and $process.ExitCode -eq 0) 'Native-copy UI did not close cleanly'
+    $process.Dispose();$process=$null
+    'PASS: Rust UI routes Windows-default copy Preview through the native worker and renders its structured result'
+
     $beforeBootstrap=@(Get-Process -Name icloud-folder-ui -ErrorAction SilentlyContinue|ForEach-Object Id)
     & (Join-Path $repo 'Start-ICloudRustUI.ps1') -InitialMode Setup
     $uiBuild=Get-Content (Join-Path $repo '.local/rust-ui-build.json') -Raw|ConvertFrom-Json

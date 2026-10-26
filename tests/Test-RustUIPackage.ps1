@@ -51,6 +51,16 @@ function Test-Launch([string]$Directory,[string]$Mode,[switch]$Cmd){
             Assert ([RustUIProbe]::Send([RustUIProbe]::GetDlgItem($window,115),0x1004,[IntPtr]::Zero,[IntPtr]::Zero).ToInt32() -gt 1) 'Packaged Rust setup preview returned no folder rows'
             Assert (-not [RustUIProbe]::IsWindowEnabled([RustUIProbe]::GetDlgItem($window,3))) 'Packaged setup preview enabled Apply before review gates passed'
 
+            if(Test-Path -LiteralPath $bridgePath){$bridgeQuarantine=$bridgePath+'.disabled-for-native-copy-test';Move-Item -LiteralPath $bridgePath -Destination $bridgeQuarantine}
+            try{
+                Select-Action $window 4
+                [RustUIProbe]::Click([RustUIProbe]::GetDlgItem($window,1))
+                Wait-For {([RustUIProbe]::Text([RustUIProbe]::GetDlgItem($window,403))+' '+[RustUIProbe]::Text([RustUIProbe]::GetDlgItem($window,103))) -like '*File-copy preview is ready*'} 'Packaged Windows-default copy preview did not finish through the bundled worker'
+                Assert ([RustUIProbe]::IsWindowVisible([RustUIProbe]::GetDlgItem($window,115))) 'Packaged Rust copy preview did not render its structured plan table'
+                Assert ([RustUIProbe]::IsWindowEnabled([RustUIProbe]::GetDlgItem($window,3))) 'Packaged validated copy preview did not enable reviewed Apply'
+            }finally{if($bridgeQuarantine -and (Test-Path -LiteralPath $bridgeQuarantine)){Move-Item -LiteralPath $bridgeQuarantine -Destination $bridgePath;$bridgeQuarantine=$null}}
+            'PASS: packaged Windows-default copy Preview uses the bundled Rust worker when the PowerShell bridge is unavailable; no files changed'
+
             $restoreRoot=Join-Path $fixture 'package-restore-targets';$null=[IO.Directory]::CreateDirectory($restoreRoot)
             $module=Import-Module (Join-Path $repo 'ICloudFolders.psm1') -Force -PassThru
             $map=& $module { Get-FolderMap -IncludeMusic }

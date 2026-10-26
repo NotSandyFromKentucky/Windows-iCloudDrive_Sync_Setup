@@ -664,6 +664,8 @@ fn native_records(
     source: &Path,
     stop: &AtomicBool,
     allow_write: bool,
+    progress_sender: Option<&mpsc::SyncSender<WorkerMessage>>,
+    cancellation: Option<&CancelEvent>,
 ) -> Result<Option<Vec<serde_json::Value>>, String> {
     if !worker.is_file() {
         return Err("The Rust backend worker is missing. Rebuild the development package.".into());
@@ -688,7 +690,10 @@ fn native_records(
         .stderr
         .take()
         .ok_or("Missing native standard error.")?;
-    let out = thread::spawn(move || drain(stdout));
+    let progress = progress_sender
+        .cloned()
+        .unwrap_or_else(|| mpsc::sync_channel(1).0);
+    let out = thread::spawn(move || read_output(stdout, progress));
     let err = thread::spawn(move || drain(stderr));
     let mut input = child.stdin.take().ok_or("Missing native standard input.")?;
     input
@@ -698,10 +703,17 @@ fn native_records(
 
     let started = std::time::Instant::now();
     let mut killed = false;
+    let mut signalled = false;
     let exit = loop {
         if !allow_write && stop.load(Ordering::Relaxed) && !killed {
             let _ = child.kill();
             killed = true;
+        }
+        if allow_write && stop.load(Ordering::Relaxed) && !signalled {
+            signalled = true;
+            if let Some(cancellation) = cancellation {
+                cancellation.signal();
+            }
         }
         if !allow_write && !killed && started.elapsed() > Duration::from_secs(120) {
             let _ = child.kill();
@@ -776,7 +788,7 @@ fn native_check(
         "include_music": options.music,
         "folder_paths": options.folder_paths,
     });
-    let Some(records) = native_records(request, worker, source, stop, false)? else {
+    let Some(records) = native_records(request, worker, source, stop, false, None, None)? else {
         return Ok(WorkerResult {
             exit_code: 3,
             message: "Read-only check stopped. No folder settings or files were changed.".into(),
@@ -844,7 +856,7 @@ fn native_setup_preview(
     stop: &AtomicBool,
 ) -> Result<WorkerResult, String> {
     let request = setup_preview_request(options);
-    let Some(records) = native_records(request, worker, source, stop, false)? else {
+    let Some(records) = native_records(request, worker, source, stop, false, None, None)? else {
         return Ok(WorkerResult {
             exit_code: 3,
             message: "Read-only preview stopped. No folder settings or files were changed.".into(),
@@ -872,7 +884,7 @@ fn native_restore_preview(
     stop: &AtomicBool,
 ) -> Result<WorkerResult, String> {
     let request = restore_preview_request(options)?;
-    let Some(records) = native_records(request, worker, source, stop, false)? else {
+    let Some(records) = native_records(request, worker, source, stop, false, None, None)? else {
         return Ok(WorkerResult {
             exit_code: 3,
             message: "Read-only preview stopped. No folder settings or files were changed.".into(),
@@ -893,6 +905,163 @@ fn native_restore_preview(
     restore_preview_result(&previews[0]["preview"], &options.backup, token)
 }
 
+fn copy_preview_request(options: &Options) -> serde_json::Value {
+    let reset_to_defaults = options.action == ACTIONS[4];
+    serde_json::json!({
+        "version": 1,
+        "operation": "copy_preview",
+        "root": options.root,
+        "reset_to_defaults": reset_to_defaults,
+        "include_music": options.music || reset_to_defaults,
+        "verified_sync_root": options.verified,
+        "folder_paths": if reset_to_defaults { serde_json::json!({}) } else { serde_json::to_value(&options.folder_paths).unwrap_or_default() },
+    })
+}
+
+fn copy_preview_result(preview: &serde_json::Value, token: &str) -> Result<WorkerResult, String> {
+    let entries = preview["entries"]
+        .as_array()
+        .ok_or("The Rust copy preview omitted its entries.")?;
+    let rows: Vec<_> = entries
+        .iter()
+        .map(|entry| {
+            serde_json::json!({
+                "Type": if entry["directory"] == true { "Folder" } else { "File" },
+                "Source": entry["source"],
+                "Destination": entry["destination"],
+                "Action": entry["action"],
+            })
+        })
+        .collect();
+    let passed = preview["review_gates_passed"] == true;
+    let report = serde_json::json!({
+        "Operation": preview["operation"],
+        "Root": preview["root"],
+        "RootRegistered": preview["root_registered"],
+        "RegisteredRoots": preview["registered_roots"],
+        "ReviewGatesPassed": passed,
+        "ResetToDefaults": preview["reset_to_defaults"],
+        "ApprovalToken": token,
+        "Rows": rows,
+    });
+    Ok(WorkerResult {
+        exit_code: if passed { 0 } else { 3 },
+        message: if passed {
+            "File-copy preview is ready. No files or folders have changed.".into()
+        } else {
+            "Review the iCloud registration acknowledgement before copying.".into()
+        },
+        text: serde_json::to_string(&report).map_err(|error| error.to_string())?,
+    })
+}
+
+fn copy_apply_request(
+    options: &Options,
+    preview_token: &str,
+    cancellation_event: &str,
+) -> serde_json::Value {
+    let reset_to_defaults = options.action == ACTIONS[4];
+    serde_json::json!({
+        "version": 1,
+        "operation": "copy_apply",
+        "root": options.root,
+        "reset_to_defaults": reset_to_defaults,
+        "include_music": options.music || reset_to_defaults,
+        "verified_sync_root": options.verified,
+        "folder_paths": if reset_to_defaults { serde_json::json!({}) } else { serde_json::to_value(&options.folder_paths).unwrap_or_default() },
+        "confirmed": true,
+        "preview_token": preview_token,
+        "cancellation_event": cancellation_event,
+    })
+}
+
+fn native_copy_preview(
+    options: &Options,
+    worker: &Path,
+    source: &Path,
+    stop: &AtomicBool,
+    sender: &mpsc::SyncSender<WorkerMessage>,
+) -> Result<WorkerResult, String> {
+    let Some(records) = native_records(
+        copy_preview_request(options),
+        worker,
+        source,
+        stop,
+        false,
+        Some(sender),
+        None,
+    )?
+    else {
+        return Ok(WorkerResult {
+            exit_code: 3,
+            message:
+                "Read-only copy preview stopped. No destination files or folders were written."
+                    .into(),
+            text: String::new(),
+        });
+    };
+    let previews: Vec<_> = records
+        .iter()
+        .filter(|record| record["type"] == "copy_preview")
+        .collect();
+    if previews.len() != 1 {
+        return Err("The Rust backend returned no unique file-copy preview.".into());
+    }
+    let preview = &previews[0]["preview"];
+    let token = previews[0]["approval_token"]
+        .as_str()
+        .filter(|value| value.len() == 64)
+        .ok_or("The Rust copy preview omitted its review token.")?;
+    copy_preview_result(preview, token)
+}
+
+fn native_copy_apply(
+    options: &Options,
+    worker: &Path,
+    source: &Path,
+    token: &str,
+    cancellation: &CancelEvent,
+    stop: &AtomicBool,
+    sender: &mpsc::SyncSender<WorkerMessage>,
+) -> Result<WorkerResult, String> {
+    let Some(records) = native_records(
+        copy_apply_request(options, token, &cancellation.name),
+        worker,
+        source,
+        stop,
+        true,
+        Some(sender),
+        Some(cancellation),
+    )?
+    else {
+        return Err("The file-copy worker stopped without a result. Inspect completed destination files before retrying.".into());
+    };
+    let results: Vec<_> = records
+        .iter()
+        .filter(|record| record["type"] == "copy_apply")
+        .collect();
+    if results.len() != 1 {
+        return Err("The Rust backend returned no unique file-copy result.".into());
+    }
+    let result = results[0];
+    let cancelled = result["cancelled"] == true;
+    let copied = result["copied"].as_u64().unwrap_or(0);
+    let completed = result["completed"].as_u64().unwrap_or(0);
+    let total = result["total"].as_u64().unwrap_or(0);
+    let report = serde_json::json!({"Copied":copied,"Completed":completed,"Total":total,"Cancelled":cancelled});
+    Ok(WorkerResult {
+        exit_code: if cancelled { 3 } else { 0 },
+        message: if cancelled {
+            "Copy stopped at a safe boundary. Originals and folder settings are unchanged; completed destination files are retained.".into()
+        } else {
+            format!(
+                "Copy verified. New files copied: {copied}. Originals retained; folder settings unchanged."
+            )
+        },
+        text: serde_json::to_string(&report).map_err(|error| error.to_string())?,
+    })
+}
+
 fn native_reset_preview(
     options: &Options,
     worker: &Path,
@@ -900,7 +1069,7 @@ fn native_reset_preview(
     stop: &AtomicBool,
 ) -> Result<WorkerResult, String> {
     let request = reset_preview_request(options);
-    let Some(records) = native_records(request, worker, source, stop, false)? else {
+    let Some(records) = native_records(request, worker, source, stop, false, None, None)? else {
         return Ok(WorkerResult {
             exit_code: 3,
             message: "Read-only preview stopped. No folder settings or files were changed.".into(),
@@ -937,7 +1106,7 @@ fn native_apply(
         "Restore a recovery backup" => restore_apply_request(options, token)?,
         _ => return Err("This Rust operation does not have a native Apply route.".into()),
     };
-    let Some(records) = native_records(request, worker, source, stop, true)? else {
+    let Some(records) = native_records(request, worker, source, stop, true, None, None)? else {
         return Err("The settings operation did not return a result. Inspect the recovery folder before retrying.".into());
     };
     let applied: Vec<_> = records
@@ -1330,22 +1499,40 @@ fn operation(
         .get()
         .cloned()
         .ok_or("The application source directory is unavailable.")?;
+    let native_copy_apply_requested = phase == "Apply" && options.copy() && review_token.is_some();
     let native_apply_requested = phase == "Apply"
         && review_token.is_some()
-        && matches!(
-            options.action.as_str(),
-            "Set up iCloud folders" | "Reset to Windows defaults" | "Restore a recovery backup"
-        );
+        && (native_copy_apply_requested
+            || matches!(
+                options.action.as_str(),
+                "Set up iCloud folders" | "Reset to Windows defaults" | "Restore a recovery backup"
+            ));
     let needs_native = options.action == "Check iCloud configuration"
         || (options.action == "Set up iCloud folders" && phase == "Preview")
         || (options.action == "Reset to Windows defaults" && phase == "Preview")
         || (options.action == "Restore a recovery backup" && phase == "DryRun")
+        || (options.copy() && phase == "Preview")
         || native_apply_requested;
     if needs_native {
         let configured = std::env::var_os("ICLOUD_NATIVE_BACKEND").map(PathBuf::from);
         let bundled = source.join("RustUI/icloud-folder-worker.exe");
         if let Some(worker) = configured.or_else(|| bundled.is_file().then_some(bundled)) {
-            return if options.action == "Check iCloud configuration" {
+            return if options.copy() && phase == "Preview" {
+                native_copy_preview(&options, &worker, &source, &stop, &sender)
+            } else if native_copy_apply_requested {
+                let cancellation = CancelEvent::new()?;
+                native_copy_apply(
+                    &options,
+                    &worker,
+                    &source,
+                    review_token
+                        .as_deref()
+                        .expect("copy apply requires a review token"),
+                    &cancellation,
+                    &stop,
+                    &sender,
+                )
+            } else if options.action == "Check iCloud configuration" {
                 native_check(&options, &worker, &source, &stop)
             } else if options.action == "Set up iCloud folders" {
                 if phase == "Preview" {
@@ -3036,6 +3223,60 @@ impl State {
         } else if self
             .running_options
             .as_ref()
+            .map(|options| options.copy())
+            .unwrap_or(false)
+        {
+            if let Ok(report) = serde_json::from_str::<serde_json::Value>(result.text.trim()) {
+                if let Some(values) = report["Rows"].as_array() {
+                    self.set_table_headers(["Source", "Destination", "Type", "Action"]);
+                    unsafe {
+                        SendMessageW(self.table, LVM_DELETEALLITEMS, 0, 0);
+                    }
+                    let rows: Vec<[String; 4]> = values
+                        .iter()
+                        .map(|row| {
+                            [
+                                row["Source"].as_str().unwrap_or("Unavailable").to_owned(),
+                                row["Destination"]
+                                    .as_str()
+                                    .unwrap_or("Unavailable")
+                                    .to_owned(),
+                                row["Type"].as_str().unwrap_or("Entry").to_owned(),
+                                row["Action"].as_str().unwrap_or("Review").to_owned(),
+                            ]
+                        })
+                        .collect();
+                    self.insert_result_rows(&rows);
+                    self.table_ready = true;
+                    let registration = match report["RootRegistered"].as_bool() {
+                        Some(true) => "registered with Windows",
+                        Some(false) if report["ReviewGatesPassed"] == true => {
+                            "not listed with Windows; manually confirmed"
+                        }
+                        Some(false) => "not registered with Windows",
+                        None => "Windows default folders",
+                    };
+                    let gate_status = if report["ReviewGatesPassed"] == true {
+                        "Review checks passed. No files or folders have changed."
+                    } else {
+                        "Review the registration acknowledgement before applying."
+                    };
+                    self.friendly = format!(
+                        "{}\r\nCopy target: {}\r\nWindows registration: {}\r\n{}\r\nOriginals stay in place; folder settings are unchanged. Cloud files may download.",
+                        result.message,
+                        if report["ResetToDefaults"] == true {
+                            "Windows default folders"
+                        } else {
+                            report["Root"].as_str().unwrap_or("Unavailable")
+                        },
+                        registration,
+                        gate_status
+                    );
+                }
+            }
+        } else if self
+            .running_options
+            .as_ref()
             .map(|options| options.action == "Restore a recovery backup")
             .unwrap_or(false)
         {
@@ -3988,6 +4229,73 @@ mod tests {
                 .bytes()
                 .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
         );
+    }
+
+    #[test]
+    fn copy_preview_and_apply_requests_bind_target_options_and_review() {
+        let mut options = Options {
+            action: ACTIONS[3].into(),
+            root: "C:\\Drive".into(),
+            backup: String::new(),
+            music: true,
+            verified: true,
+            keep_files: false,
+            json: false,
+            desktop_shortcut: false,
+            folder_paths: Default::default(),
+        };
+        options
+            .folder_paths
+            .insert("Desktop".into(), "C:\\Drive\\Work Desktop".into());
+        let preview = copy_preview_request(&options);
+        assert_eq!(preview["operation"], "copy_preview");
+        assert_eq!(preview["reset_to_defaults"], false);
+        assert_eq!(preview["include_music"], true);
+        assert_eq!(preview["verified_sync_root"], true);
+        assert_eq!(
+            preview["folder_paths"]["Desktop"],
+            "C:\\Drive\\Work Desktop"
+        );
+
+        let token = "A".repeat(64);
+        let apply = copy_apply_request(
+            &options,
+            &token,
+            "Local\\ICloudCopy-0123456789abcdef0123456789abcdef",
+        );
+        assert_eq!(apply["operation"], "copy_apply");
+        assert_eq!(apply["confirmed"], true);
+        assert_eq!(apply["preview_token"], token);
+        assert_eq!(
+            apply["cancellation_event"],
+            "Local\\ICloudCopy-0123456789abcdef0123456789abcdef"
+        );
+
+        options.action = ACTIONS[4].into();
+        let defaults = copy_preview_request(&options);
+        assert_eq!(defaults["reset_to_defaults"], true);
+        assert_eq!(defaults["include_music"], true);
+        assert_eq!(defaults["folder_paths"], serde_json::json!({}));
+    }
+
+    #[test]
+    fn copy_preview_report_retains_rows_and_blocks_unverified_roots() {
+        let preview = serde_json::json!({
+            "operation":"copy_to_icloud",
+            "root":"C:\\Drive",
+            "root_registered":false,
+            "registered_roots":[],
+            "review_gates_passed":false,
+            "reset_to_defaults":false,
+            "entries":[{"directory":false,"source":"C:\\Users\\Test\\Desktop\\a.txt","destination":"C:\\Drive\\Desktop\\a.txt","action":"Copy"}]
+        });
+        let result = copy_preview_result(&preview, &"B".repeat(64)).unwrap();
+        let report: serde_json::Value = serde_json::from_str(&result.text).unwrap();
+        assert_eq!(result.exit_code, 3);
+        assert_eq!(report["ReviewGatesPassed"], false);
+        assert_eq!(report["Rows"].as_array().unwrap().len(), 1);
+        assert_eq!(report["Rows"][0]["Type"], "File");
+        assert_eq!(report["Rows"][0]["Action"], "Copy");
     }
 
     #[test]
