@@ -1285,14 +1285,11 @@ impl CancelEvent {
     fn new() -> Result<Self, String> {
         unsafe {
             use windows_sys::Win32::System::Threading::*;
-            let name = format!(
-                "Local\\ICloudCopy-{}-{}",
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_err(|e| e.to_string())?
-                    .as_nanos()
-            );
+            let ticks = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|e| e.to_string())?
+                .as_nanos();
+            let name = copy_cancel_event_name(std::process::id(), ticks);
             let handle = CreateEventW(null_mut(), 1, 0, wide(&name).as_ptr());
             if handle.is_null() {
                 return Err("Windows could not create the copy cancellation event.".into());
@@ -1305,6 +1302,15 @@ impl CancelEvent {
             windows_sys::Win32::System::Threading::SetEvent(self.handle);
         }
     }
+}
+
+fn copy_cancel_event_name(process_id: u32, ticks: u128) -> String {
+    // ICloudFolderCopy.psm1 accepts exactly 32 hexadecimal characters after this prefix.
+    // Keep the producer and consumer on the same bounded named-event contract.
+    format!(
+        "Local\\ICloudCopy-{:032x}",
+        ticks ^ (u128::from(process_id) << 64)
+    )
 }
 impl Drop for CancelEvent {
     fn drop(&mut self) {
@@ -3971,6 +3977,19 @@ mod tests {
         assert_eq!(apply["preview_token"], token);
         assert!(reset_preview_result(&serde_json::json!({"operation":"setup"}), &token).is_err());
     }
+
+    #[test]
+    fn copy_cancel_event_name_matches_power_shell_contract() {
+        let name = copy_cancel_event_name(123, 456);
+        let suffix = name.strip_prefix("Local\\ICloudCopy-").unwrap();
+        assert_eq!(suffix.len(), 32);
+        assert!(
+            suffix
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        );
+    }
+
     #[test]
     fn setup_preview_retains_rows_and_never_passes_failed_review_gates() {
         let mut preview = serde_json::json!({
