@@ -16,7 +16,10 @@ $manifest=Join-Path $snapshotPath 'Cargo.toml'
 if(-not (Test-Path -LiteralPath $manifest -PathType Leaf)){throw 'The immutable backend snapshot is missing Cargo.toml.'}
 $cargo=(Get-Command cargo -CommandType Application -ErrorAction Stop).Source
 $oldTarget=$env:CARGO_TARGET_DIR
+$oldMap=$env:ICLOUD_FOLDER_MAP_PATH
 try{
+    $env:ICLOUD_FOLDER_MAP_PATH=Join-Path $snapshotPath 'folder-map.json'
+    if(-not (Test-Path -LiteralPath $env:ICLOUD_FOLDER_MAP_PATH -PathType Leaf)){throw 'The immutable backend snapshot is missing generated folder-map.json metadata.'}
     $env:CARGO_TARGET_DIR=Join-Path $snapshotPath 'target'
     $info=New-Object Diagnostics.ProcessStartInfo
     $info.FileName=$cargo
@@ -41,4 +44,5 @@ try{
     }finally{$process.Dispose()}
 }finally{
     $env:CARGO_TARGET_DIR=$oldTarget
+    $env:ICLOUD_FOLDER_MAP_PATH=$oldMap
 }
