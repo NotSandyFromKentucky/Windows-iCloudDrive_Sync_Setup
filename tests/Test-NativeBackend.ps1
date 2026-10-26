@@ -229,9 +229,9 @@ try{
 } finally {
         try{foreach($providerName in $registrationOwned){$registrationBase.DeleteSubKeyTree($providerName,$false)}}finally{$registrationBase.Dispose()}
     }
-    $rustErrorLabels=@($check.errors|ForEach-Object{if($_ -match '^Cannot resolve the Windows current folder for (Desktop|Documents|Pictures|Videos|Music|Captures):'){'KnownFolder='+$matches[1]}elseif($_ -like 'Registry path*'){'RegistryPath'}else{'Other'}}) -join '|'
+    $rustErrorLabels=@($check.errors|ForEach-Object{if($_ -match '^Cannot resolve the Windows current folder for (Desktop|Documents|Pictures|Videos|Music|Captures):'){$label='KnownFolder='+$matches[1];$parts=$_.Split('(');if($parts.Count -gt 1){$label+=' '+$parts[-1].TrimEnd(')')};$label}elseif($_ -like 'Registry path*'){'RegistryPath'}else{'Other'}}) -join '|'
     $nativeCaptureRows=@($check.resolved_folders|Where-Object folder -ceq 'Videos\Captures')
-    $powershellCaptureRows=@($referenceCheck.ResolvedFolders|Where-Object Folder -ceq 'Captures')
+    $powershellCaptureRows=@($referenceCheck.ResolvedFolders|Where-Object Folder -ceq 'Videos\Captures')
     $captureState='native='+$nativeCaptureRows.Count+'/'+[bool]($nativeCaptureRows.Count -and $null -ne $nativeCaptureRows[0].current)+' PowerShell='+$powershellCaptureRows.Count+'/'+[bool]($powershellCaptureRows.Count -and $null -ne $powershellCaptureRows[0].Current)
     Assert ($check.errors.Count -eq $referenceCheck.Errors.Count) ('Rust and PowerShell checker error counts differ (Rust='+$check.errors.Count+', PowerShell='+$referenceCheck.Errors.Count+', Rust labels='+$rustErrorLabels+', '+$captureState+')')
     Assert ($check.healthy -eq $referenceCheck.Healthy) 'Rust and PowerShell checker health results differ'
