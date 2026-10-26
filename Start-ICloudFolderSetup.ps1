@@ -1,9 +1,9 @@
 #requires -Version 5.1
-param([ValidateSet('Setup','Reset','Check','Install')][string]$InitialMode='Setup')
+param([ValidateSet('Setup','Reset','Check','Install')][string]$InitialMode='Setup',[switch]$ForceWinUI,[switch]$UseRustPreview)
 $ErrorActionPreference='Stop'
 try{
     Import-Module (Join-Path $PSScriptRoot 'ICloudFolderSetup.Launch.psm1') -Force
-    $spec=Get-NativeLaunchSpec -Source $PSScriptRoot -InitialMode $InitialMode
+    $spec=Get-NativeLaunchSpec -Source $PSScriptRoot -InitialMode $InitialMode -ForceWinUI:$ForceWinUI -UseRustPreview:$UseRustPreview
     $info=New-Object Diagnostics.ProcessStartInfo
     $info.FileName=$spec.Executable;$info.Arguments=$spec.Arguments;$info.WorkingDirectory=$spec.WorkingDirectory
     $info.UseShellExecute=$false;$info.CreateNoWindow=$true

@@ -30,6 +30,11 @@
                   "tools/ReleaseInputs.psm1",
                   "ICloudFolderSetup.Launch.psm1"
               ],
+    "RustUI": {
+        "SourceFiles": ["ui/rust/Cargo.toml", "ui/rust/Cargo.lock", "ui/rust/src/main.rs", "ui/rust/app.manifest"],
+        "Executable": "RustUI/icloud-folder-ui.exe",
+        "WorkerExecutable": "RustUI/icloud-folder-worker.exe"
+    },
     "NativeUI":  {
                      "Project":  "ui/ICloudFolderSetup/ICloudFolderSetup.csproj",
                      "SourceFiles":  [

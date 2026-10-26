@@ -30,8 +30,9 @@ function Install-SetupFiles {
         if($files -notcontains $required){throw "Required installation file is missing: $required"}
     }
     $native=($files -contains 'NativeUI/ICloudFolderSetup.exe')
-    if($RequireNative -and -not $native){throw 'The native application package is incomplete. Install from a complete WinUI release package; a source checkout is not an installable native package.'}
-    if($native){foreach($required in @('tools/Invoke-WinUIBridge.ps1','tools/Invoke-WinUIInstall.ps1')){if($files -notcontains $required){throw "Required native installation file is missing: $required"}}}
+    $rust=($null -ne $manifest -and $manifest.PSObject.Properties['Interface'] -and $manifest.Interface -eq 'Rust' -and $files -contains 'RustUI/icloud-folder-ui.exe')
+    if($RequireNative -and -not ($native -or $rust)){throw 'The native application package is incomplete. Install from a complete native package; a source checkout is not an installable native package.'}
+    if($native -or $rust){foreach($required in @('tools/Invoke-WinUIBridge.ps1','tools/Invoke-WinUIInstall.ps1','ICloudFolderSetup.Launch.psm1')){if($files -notcontains $required){throw "Required native installation file is missing: $required"}}}
     $version=(Get-Content -LiteralPath (Join-Path $sourceFull 'VERSION') -Raw).Trim()
     if($version -notmatch '^\d+\.\d+\.\d+$'){throw 'Invalid version.'}
     $destination=Join-Path ([IO.Path]::GetFullPath($InstallRoot)) ($version+'-'+[guid]::NewGuid().ToString('N'))
@@ -62,7 +63,10 @@ function Install-SetupFiles {
             }
             $shortcut=$shell.CreateShortcut($link)
             try{
-                if($native){
+                if($rust){
+                    $shortcut.TargetPath=Join-Path $destination 'RustUI\icloud-folder-ui.exe'
+                    $shortcut.Arguments=''
+                }elseif($native){
                     $shortcut.TargetPath=Join-Path $destination 'NativeUI\ICloudFolderSetup.exe'
                     $shortcut.Arguments=''
                 }else{
