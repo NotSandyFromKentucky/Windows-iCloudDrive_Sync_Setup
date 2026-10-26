@@ -1,5 +1,13 @@
 # Project context
 
+## Continuation handoff - 2026-10-26 (Rust high-contrast CI budget)
+
+Commits `582262b` and `886b3b6` add Rust UI high-contrast rendering coverage and exact compatibility-bridge action/phase checks for Cloud test and Install. The local immutable UI snapshot passed all 12 Rust tests; hidden-desktop parity, theme rendering at 96/144/192 DPI and launcher-routing checks pass. The backend snapshot passed all 26 Rust tests and compiled the worker; three Cloud Files provider tests remain ignored locally and are restricted to the isolated provider harness. Local Windows lacks `link.exe`, so rebuilds must use the documented cached Rust lld and SDK/CRT libraries; no global toolchain changes were made.
+
+GitHub run `40393815756` for `582262b` still appeared In progress after more than 15 minutes. Its Rust integration job had a 15-minute timeout and now includes package and high-contrast checks, so that job timeout is raised to 25 minutes for the next run. Anonymous GitHub API access is rate-limited and the run page does not expose logs; the Rust high-contrast hosted test is therefore not yet verified. The real `.git/index` remains intentionally absent; keep using a fresh alternate index for Git review and commits.
+
+Actual iCloud hydration/copy, a forced Win32 registry-write failure, paged large-copy review, cancellation during copy preflight, hostile concurrent ancestor swaps, physical Narrator/external assistive-technology and mixed-DPI acceptance, and production routing remain open. Continue to keep the Rust frontend and worker opt-in; do not publish a release or move tags for prototype readiness.
+
 ## Continuation handoff - 2026-10-26 (Rust native copy preview and Apply)
 
 Native file-copy Preview and Apply are now implemented in the worker and routed from the Rust UI for both iCloud-root copies and copies to Windows default folders. Preview returns the complete plan and a SHA-256 approval token over the review. Apply requires explicit confirmation, takes the shared settings mutex, rebuilds the complete review, rejects a stale token, creates destination files without overwriting, streams and verifies hashes, retains originals, and observes cancellation at safe file boundaries. The source is opened with guarded Win32 handles; volume/file identity, size and last-write metadata are checked around the copy, with a retained placeholder handle when the source is still a Cloud Files placeholder. The UI displays the plan and review gate and passes the same options/token into Apply. README now reflects this implementation.
