@@ -1045,14 +1045,19 @@ fn native_copy_apply(
     }
     let result = results[0];
     let cancelled = result["cancelled"] == true;
+    let preflight_cancelled = result["preflight_cancelled"] == true;
     let copied = result["copied"].as_u64().unwrap_or(0);
     let completed = result["completed"].as_u64().unwrap_or(0);
     let total = result["total"].as_u64().unwrap_or(0);
-    let report = serde_json::json!({"Copied":copied,"Completed":completed,"Total":total,"Cancelled":cancelled});
+    let report = serde_json::json!({"Copied":copied,"Completed":completed,"Total":total,"Cancelled":cancelled,"PreflightCancelled":preflight_cancelled});
     Ok(WorkerResult {
         exit_code: if cancelled { 3 } else { 0 },
         message: if cancelled {
-            "Copy stopped at a safe boundary. Originals and folder settings are unchanged; completed destination files are retained.".into()
+            if preflight_cancelled {
+                "Copy review stopped before any destination files were changed. Originals and folder settings are unchanged.".into()
+            } else {
+                "Copy stopped at a safe file boundary. Originals and folder settings are unchanged; completed destination files are retained.".into()
+            }
         } else {
             format!(
                 "Copy verified. New files copied: {copied}. Originals retained; folder settings unchanged."
@@ -3579,16 +3584,19 @@ impl State {
                 WorkerMessage::Progress(v) => {
                     let total = v["Total"].as_u64().unwrap_or(0);
                     let done = v["Completed"].as_u64().unwrap_or(0);
-                    set_text(
-                        self.status_label,
-                        &format!(
-                            "{}: {} of {} files verified\r\n{}",
-                            v["Stage"].as_str().unwrap_or("Working"),
-                            done,
-                            total,
-                            v["File"].as_str().unwrap_or("")
-                        ),
-                    );
+                    let stage = v["Stage"].as_str().unwrap_or("Working");
+                    let file = v["File"].as_str().unwrap_or("");
+                    if stage == "Reviewing copy plan" {
+                        set_text(
+                            self.status_label,
+                            &format!("Reviewing copy plan: {done} entries checked\r\n{file}"),
+                        );
+                    } else {
+                        set_text(
+                            self.status_label,
+                            &format!("{stage}: {done} of {total} files verified\r\n{file}"),
+                        );
+                    }
                     if total > 0 {
                         unsafe {
                             SendMessageW(self.progress, PBM_SETMARQUEE, 0, 0);

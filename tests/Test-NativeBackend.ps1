@@ -537,7 +537,7 @@ try{
             $cancelCopyRequest=@{version=1;operation='copy_apply';root=$applyRoot;include_music=$true;verified_sync_root=$false;folder_paths=@{};confirmed=$true;preview_token=$copyApproval;cancellation_event=$cancelCopyEvent}|ConvertTo-Json -Compress
             $cancelledCopy=Invoke-Worker $cancelCopyRequest
             $cancelledResult=@($cancelledCopy|Where-Object type -ceq 'copy_apply')
-            Assert ($cancelledResult.Count -eq 1 -and $cancelledResult[0].cancelled -and $cancelledResult[0].copied -eq 0) 'Native copy cancellation did not stop before its first file boundary'
+            Assert ($cancelledResult.Count -eq 1 -and $cancelledResult[0].cancelled -and $cancelledResult[0].preflight_cancelled -and $cancelledResult[0].copied -eq 0) 'Native copy cancellation did not stop during the fresh preflight before any destination write'
             Assert (-not(Test-Path -LiteralPath $copyDestinationFile)) 'Cancelled native copy created a destination file'
         }finally{$cancelCopyHandle.Dispose()}
         $copyPreview=Invoke-Worker $copyPreviewRequest

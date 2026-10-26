@@ -1881,6 +1881,34 @@ fn copy_review(
     folder_paths: &BTreeMap<String, PathBuf>,
     applying: bool,
 ) -> Result<CopyReview> {
+    copy_review_cancellable(
+        map,
+        root,
+        reset_to_defaults,
+        include_music,
+        verified_sync_root,
+        folder_paths,
+        applying,
+        None,
+        None,
+    )?
+    .ok_or_else(|| COPY_REVIEW_CANCELLED.into())
+}
+
+fn copy_review_cancellable(
+    map: &[Mapping],
+    root: &Path,
+    reset_to_defaults: bool,
+    include_music: bool,
+    verified_sync_root: bool,
+    folder_paths: &BTreeMap<String, PathBuf>,
+    applying: bool,
+    cancellation: Option<&CopyCancellation>,
+    progress: Option<&mut dyn Write>,
+) -> Result<Option<CopyReview>> {
+    if copy_cancelled(cancellation)? {
+        return Ok(None);
+    }
     let (normalized_root, pairs, registered, root_registered) = if reset_to_defaults {
         if !folder_paths.is_empty() {
             return Err("Custom folder paths cannot replace Windows default locations.".into());
@@ -1908,8 +1936,10 @@ fn copy_review(
             .any(|candidate| paths_equal(candidate, &root_text));
         (normalized_root, pairs, registered, Some(root_registered))
     };
-    let entries = plan_entries(&pairs)?;
-    Ok(CopyReview {
+    let Some(entries) = plan_entries_cancellable(&pairs, cancellation, progress)? else {
+        return Ok(None);
+    };
+    Ok(Some(CopyReview {
         operation: if reset_to_defaults {
             "copy_to_windows_defaults"
         } else {
@@ -1931,7 +1961,7 @@ fn copy_review(
         folder_paths: folder_paths.clone(),
         pairs,
         entries,
-    })
+    }))
 }
 
 fn folder_label(item: &Mapping) -> String {
@@ -2869,6 +2899,15 @@ impl CngSha256Provider {
     }
 
     fn digest_reader(&self, reader: &mut impl Read, buffer: &mut [u8]) -> Result<String> {
+        self.digest_reader_cancellable(reader, buffer, None)
+    }
+
+    fn digest_reader_cancellable(
+        &self,
+        reader: &mut impl Read,
+        buffer: &mut [u8],
+        cancellation: Option<&CopyCancellation>,
+    ) -> Result<String> {
         let mut object = vec![0u8; self.object_length as usize];
         let mut handle: BCRYPT_HASH_HANDLE = std::ptr::null_mut();
         // SAFETY: the provider is live and object is writable for its queried provider size.
@@ -2891,6 +2930,9 @@ impl CngSha256Provider {
             _object: object,
         };
         loop {
+            if copy_cancelled(cancellation)? {
+                return Err(COPY_REVIEW_CANCELLED.into());
+            }
             let count = reader.read(buffer).map_err(|error| error.to_string())?;
             if count == 0 {
                 break;
@@ -3058,13 +3100,20 @@ fn hydrate_placeholder_range(handle: HANDLE, offset: u64, length: u64) -> Result
     Ok(())
 }
 
-fn hydrate_cloud_placeholder(handle: HANDLE, size: u64) -> Result<()> {
+fn hydrate_cloud_placeholder(
+    handle: HANDLE,
+    size: u64,
+    cancellation: Option<&CopyCancellation>,
+) -> Result<()> {
     const RANGE_BYTES: u64 = 64 * 1024;
     if size > i64::MAX as u64 {
         return Err("Cloud Files placeholder is too large to hydrate safely.".into());
     }
     let mut offset = 0u64;
     while offset < size {
+        if copy_cancelled(cancellation)? {
+            return Err(COPY_REVIEW_CANCELLED.into());
+        }
         let length = RANGE_BYTES.min(size - offset);
         hydrate_placeholder_range(handle, offset, length)?;
         offset += length;
@@ -3076,6 +3125,7 @@ fn hash_cloud_placeholder(
     path: &Path,
     provider: &CngSha256Provider,
     buffer: &mut [u8],
+    cancellation: Option<&CopyCancellation>,
 ) -> Result<String> {
     use std::os::windows::ffi::OsStrExt;
     let wide_path: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
@@ -3121,7 +3171,7 @@ fn hash_cloud_placeholder(
         return Err("The file changed or is not a Cloud Files placeholder.".into());
     }
 
-    hydrate_cloud_placeholder(handle, file_size(&before))?;
+    hydrate_cloud_placeholder(handle, file_size(&before), cancellation)?;
     let mut hydrated = BY_HANDLE_FILE_INFORMATION::default();
     if unsafe { GetFileInformationByHandle(handle, &mut hydrated) } == 0
         || !stable_file_identity(&before, &hydrated)
@@ -3172,7 +3222,7 @@ fn hash_cloud_placeholder(
     {
         return Err("Hydrated Cloud Files data is not a regular, unencrypted file.".into());
     }
-    let digest = provider.digest_reader(&mut file, buffer)?;
+    let digest = provider.digest_reader_cancellable(&mut file, buffer, cancellation)?;
     let mut data_after = BY_HANDLE_FILE_INFORMATION::default();
     if unsafe { GetFileInformationByHandle(data_handle, &mut data_after) } == 0
         || !stable_file_identity(&data_before, &data_after)
@@ -3185,12 +3235,26 @@ fn hash_cloud_placeholder(
 }
 
 fn hash(path: &Path, provider: &CngSha256Provider, buffer: &mut [u8]) -> Result<String> {
+    hash_cancellable(path, provider, buffer, None)
+}
+
+const COPY_REVIEW_CANCELLED: &str = "Copy review cancelled.";
+
+fn hash_cancellable(
+    path: &Path,
+    provider: &CngSha256Provider,
+    buffer: &mut [u8],
+    cancellation: Option<&CopyCancellation>,
+) -> Result<String> {
+    if copy_cancelled(cancellation)? {
+        return Err(COPY_REVIEW_CANCELLED.into());
+    }
     guarded_copy_metadata(path)?;
     use std::os::windows::ffi::OsStrExt;
 
     let path_tag = cloud_file_reparse_tag(path)?;
     if is_cloud_file_reparse_tag(path_tag) {
-        return hash_cloud_placeholder(path, provider, buffer);
+        return hash_cloud_placeholder(path, provider, buffer, cancellation);
     }
 
     let wide_path: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
@@ -3232,7 +3296,7 @@ fn hash(path: &Path, provider: &CngSha256Provider, buffer: &mut [u8]) -> Result<
     {
         return Err("Hashing requires a regular, unencrypted file without reparse points.".into());
     }
-    let digest = provider.digest_reader(&mut file, buffer)?;
+    let digest = provider.digest_reader_cancellable(&mut file, buffer, cancellation)?;
     let mut after = BY_HANDLE_FILE_INFORMATION::default();
     if unsafe { GetFileInformationByHandle(handle, &mut after) } == 0 {
         return Err(format!(
@@ -3266,7 +3330,18 @@ fn inside(path: &Path, root: &Path) -> Result<bool> {
 }
 
 fn plan_entries(pairs: &[CopyPair]) -> Result<Vec<Entry>> {
+    plan_entries_cancellable(pairs, None, None)?.ok_or_else(|| COPY_REVIEW_CANCELLED.into())
+}
+
+fn plan_entries_cancellable(
+    pairs: &[CopyPair],
+    cancellation: Option<&CopyCancellation>,
+    mut progress: Option<&mut dyn Write>,
+) -> Result<Option<Vec<Entry>>> {
     const PAIR_LIMIT: usize = 64;
+    if copy_cancelled(cancellation)? {
+        return Ok(None);
+    }
     if pairs.len() > PAIR_LIMIT {
         return Err(format!(
             "Copy plan has more than {PAIR_LIMIT} source pairs."
@@ -3311,6 +3386,9 @@ fn plan_entries(pairs: &[CopyPair]) -> Result<Vec<Entry>> {
     let mut entries = Vec::new();
     let mut visited = 0usize;
     while let Some((source, destination, depth)) = queue.pop_front() {
+        if copy_cancelled(cancellation)? {
+            return Ok(None);
+        }
         validate_path(&source)?;
         validate_path(&destination)?;
         if depth > DEPTH_LIMIT || visited >= ENTRY_LIMIT {
@@ -3326,7 +3404,11 @@ fn plan_entries(pairs: &[CopyPair]) -> Result<Vec<Entry>> {
         let digest = if directory {
             None
         } else {
-            Some(hash(&source, &hash_provider, &mut buffer)?)
+            match hash_cancellable(&source, &hash_provider, &mut buffer, cancellation) {
+                Ok(digest) => Some(digest),
+                Err(error) if error == COPY_REVIEW_CANCELLED => return Ok(None),
+                Err(error) => return Err(error),
+            }
         };
         let target_key = OrdinalPath::new(&destination)?;
         if let Some((previous_directory, previous_hash)) = targets.get(&target_key) {
@@ -3343,7 +3425,18 @@ fn plan_entries(pairs: &[CopyPair]) -> Result<Vec<Entry>> {
                 Some(target)
                     if !directory
                         && target.is_file()
-                        && Some(hash(&destination, &hash_provider, &mut buffer)?) == digest =>
+                        && Some(
+                            match hash_cancellable(
+                                &destination,
+                                &hash_provider,
+                                &mut buffer,
+                                cancellation,
+                            ) {
+                                Ok(digest) => digest,
+                                Err(error) if error == COPY_REVIEW_CANCELLED => return Ok(None),
+                                Err(error) => return Err(error),
+                            },
+                        ) == digest =>
                 {
                     "SkipIdentical"
                 }
@@ -3365,6 +3458,17 @@ fn plan_entries(pairs: &[CopyPair]) -> Result<Vec<Entry>> {
                 action,
             });
         }
+        if visited == 1 || visited % 32 == 0 {
+            if let Some(output) = progress.as_deref_mut() {
+                emit_copy_progress(
+                    output,
+                    "Reviewing copy plan",
+                    &source.to_string_lossy(),
+                    visited,
+                    0,
+                )?;
+            }
+        }
         if directory {
             for child in fs::read_dir(&source).map_err(|error| error.to_string())? {
                 let child = child.map_err(|error| error.to_string())?;
@@ -3375,7 +3479,10 @@ fn plan_entries(pairs: &[CopyPair]) -> Result<Vec<Entry>> {
             }
         }
     }
-    Ok(entries)
+    if copy_cancelled(cancellation)? {
+        return Ok(None);
+    }
+    Ok(Some(entries))
 }
 
 struct CopyCancellation(HANDLE);
@@ -3412,8 +3519,15 @@ fn copy_cancellation_requested(event: &CopyCancellation) -> Result<bool> {
     }
 }
 
+fn copy_cancelled(cancellation: Option<&CopyCancellation>) -> Result<bool> {
+    match cancellation {
+        Some(event) => copy_cancellation_requested(event),
+        None => Ok(false),
+    }
+}
+
 fn emit_copy_progress(
-    output: &mut impl Write,
+    output: &mut (impl Write + ?Sized),
     stage: &str,
     path: &str,
     completed: usize,
@@ -3688,7 +3802,7 @@ fn apply_copy_review(
         emit_copy_progress(output, "Verified", &entry.source, completed, total)?;
     }
     Ok(
-        serde_json::json!({"version":1,"type":"copy_apply","copied":copied,"completed":completed,"total":total,"cancelled":false}),
+        serde_json::json!({"version":1,"type":"copy_apply","copied":copied,"completed":completed,"total":total,"cancelled":false,"preflight_cancelled":false}),
     )
 }
 
@@ -3887,7 +4001,7 @@ fn run(input: impl Read, output: &mut impl Write) -> Result<bool> {
                 }
                 let cancellation = open_copy_cancellation(&cancellation_event)?;
                 let _settings_mutex = acquire_settings_mutex()?;
-                let fresh = copy_review(
+                let Some(fresh) = copy_review_cancellable(
                     &map,
                     &root,
                     reset_to_defaults,
@@ -3895,7 +4009,19 @@ fn run(input: impl Read, output: &mut impl Write) -> Result<bool> {
                     verified_sync_root,
                     &folder_paths,
                     true,
-                )?;
+                    Some(&cancellation),
+                    Some(output),
+                )?
+                else {
+                    return Ok(
+                        serde_json::json!({"version":1,"type":"copy_apply","copied":0,"completed":0,"total":0,"cancelled":true,"preflight_cancelled":true}),
+                    );
+                };
+                if copy_cancellation_requested(&cancellation)? {
+                    return Ok(
+                        serde_json::json!({"version":1,"type":"copy_apply","copied":0,"completed":0,"total":0,"cancelled":true,"preflight_cancelled":true}),
+                    );
+                }
                 if approval_token(&fresh)? != expected_token {
                     return Err("Files, folder settings or destinations changed after review. Preview again before copying.".into());
                 }
@@ -4228,6 +4354,21 @@ mod tests {
                     0
                 );
             }
+            Ok(())
+        }
+    }
+
+    struct SignalOnFlush(HANDLE);
+    impl Write for SignalOnFlush {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            // SAFETY: the test owns this live manual-reset event handle.
+            assert_ne!(
+                unsafe { windows_sys::Win32::System::Threading::SetEvent(self.0) },
+                0
+            );
             Ok(())
         }
     }
@@ -4641,6 +4782,41 @@ mod tests {
             fs::read(source.join("second.txt")).unwrap(),
             b"second original"
         );
+        drop(cancellation);
+        unsafe { CloseHandle(owner) };
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn copy_apply_preflight_cancels_during_fresh_plan_without_writing() {
+        let root = std::env::temp_dir().join(format!(
+            "icloud-copy-preflight-cancel-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let source = root.join("source");
+        let destination = root.join("destination");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(source.join("first.txt"), b"original retained").unwrap();
+        let (name, owner) = create_copy_cancel_event(false);
+        let cancellation = open_copy_cancellation(&name).unwrap();
+        let pairs = vec![CopyPair {
+            source: source.clone(),
+            destination: destination.clone(),
+        }];
+        let mut progress = SignalOnFlush(owner);
+        let review = plan_entries_cancellable(&pairs, Some(&cancellation), Some(&mut progress))
+            .expect("planning should report cancellation as a completed safe stop");
+        assert!(review.is_none(), "cancelled preflight returned a review");
+        assert!(
+            copy_cancellation_requested(&cancellation).unwrap(),
+            "planning progress did not signal cancellation"
+        );
+        assert!(source.join("first.txt").is_file());
+        assert!(!destination.exists(), "preflight wrote a destination");
         drop(cancellation);
         unsafe { CloseHandle(owner) };
         fs::remove_dir_all(root).unwrap();
