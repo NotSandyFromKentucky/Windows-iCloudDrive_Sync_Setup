@@ -113,7 +113,11 @@ try{
             }
             $hresultText=$hresultMatch.Groups[1].Value
             if($hresultText.StartsWith('0x',[StringComparison]::OrdinalIgnoreCase)){$hresultBits=[Convert]::ToUInt32($hresultText.Substring(2),16)}
-            else{$hresultValue=[int64]::Parse($hresultText,[Globalization.CultureInfo]::InvariantCulture);$hresultBits=[uint32]($hresultValue -band 4294967295)}
+            else{
+                $hresultValue=0L
+                if(-not [int64]::TryParse($hresultText,[Globalization.NumberStyles]::Integer,[Globalization.CultureInfo]::InvariantCulture,[ref]$hresultValue)){$comparisonDetails.Add("$($failure.folder)=unparsed HRESULT token [$hresultText]");continue}
+                $hresultBits=[uint32]($hresultValue -band 4294967295)
+            }
             $hresultHex='0x'+('{0:X8}' -f $hresultBits)
             $nativeMatch=[regex]::Match($nativeMessage,'Cannot resolve the Windows current folder for (?<folder>[^:]+): SHGetKnownFolderPath failed \(HRESULT (?<hresult>0x[0-9A-Fa-f]{8})\)\.')
             $nativeFolder=if($nativeMatch.Success){$nativeMatch.Groups['folder'].Value}else{'unparsed'}
