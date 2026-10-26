@@ -101,8 +101,13 @@ try{
         $matchingFailure=$false
         $comparisonDetails=New-Object 'System.Collections.Generic.List[string]'
         foreach($failure in $currentPathFailures){
-            $hresultMatch=[regex]::Match($failure.message,'HRESULT\s+(0x[0-9A-Fa-f]{8}|-?\d+)')
-            if(-not $hresultMatch.Success){$comparisonDetails.Add("$($failure.folder)=unparsed PowerShell HRESULT");continue}
+            $hresultMatch=[regex]::Match($failure.message,'(?i)HRESULT\s*[:=]?\s*(0x[0-9A-Fa-f]{8}|-?\d+)')
+            if(-not $hresultMatch.Success){
+                $safeFailure=[regex]::Replace([string]$failure.message,'(?i)(?:[a-z]:\\|\\\\)[^\r\n]*','[path details withheld]')
+                $safeFailure=[regex]::Replace($safeFailure,'(?i)\{?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\}?','[Known Folder ID]')
+                if($safeFailure.Length -gt 160){$safeFailure=$safeFailure.Substring(0,160)}
+                $comparisonDetails.Add("$($failure.folder)=unparsed HRESULT; $safeFailure");continue
+            }
             $hresultText=$hresultMatch.Groups[1].Value
             if($hresultText.StartsWith('0x',[StringComparison]::OrdinalIgnoreCase)){$hresultBits=[Convert]::ToUInt32($hresultText.Substring(2),16)}
             else{$hresultValue=[int64]::Parse($hresultText,[Globalization.CultureInfo]::InvariantCulture);$hresultBits=[uint32]($hresultValue -band 4294967295)}
