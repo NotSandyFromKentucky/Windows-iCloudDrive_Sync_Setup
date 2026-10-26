@@ -229,7 +229,8 @@ try{
 } finally {
         try{foreach($providerName in $registrationOwned){$registrationBase.DeleteSubKeyTree($providerName,$false)}}finally{$registrationBase.Dispose()}
     }
-    Assert ($check.errors.Count -eq $referenceCheck.Errors.Count) ('Rust and PowerShell checker error counts differ (Rust='+$check.errors.Count+', PowerShell='+$referenceCheck.Errors.Count+')')
+    $rustErrorLabels=@($check.errors|ForEach-Object{if($_ -match '^Cannot resolve the Windows current folder for (Desktop|Documents|Pictures|Videos|Music|Captures):'){'KnownFolder='+$matches[1]}elseif($_ -like 'Registry path*'){'RegistryPath'}else{'Other'}}) -join '|'
+    Assert ($check.errors.Count -eq $referenceCheck.Errors.Count) ('Rust and PowerShell checker error counts differ (Rust='+$check.errors.Count+', PowerShell='+$referenceCheck.Errors.Count+', Rust labels='+$rustErrorLabels+')')
     Assert ($check.healthy -eq $referenceCheck.Healthy) 'Rust and PowerShell checker health results differ'
     $withoutMusicRequest=@{version=1;operation='check';root=$fixture;include_music=$false}|ConvertTo-Json -Compress
     $withoutMusic=(Invoke-Worker $withoutMusicRequest)[0].check
