@@ -154,8 +154,9 @@ try{
     }
     Assert ($check.registered_roots.Count -eq $referenceCheck.RegisteredRoots.Count) 'Rust and PowerShell checker registered-root counts differ'
     foreach($registered in $referenceCheck.RegisteredRoots){
-        Assert (@($check.registered_roots|Where-Object {[string]::Equals($_,$registered,[StringComparison]::OrdinalIgnoreCase)}).Count -eq 1) 'Rust and PowerShell checker registered roots differ'
+    Assert (@($check.registered_roots|Where-Object {[string]::Equals($_,$registered,[StringComparison]::OrdinalIgnoreCase)}).Count -eq 1) 'Rust and PowerShell checker registered roots differ'
     }
+    $sid=[string](& $module { Get-UserSid })
     $registrationBasePath='SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\SyncRootManager'
     $registrationProbeId=[guid]::NewGuid().ToString('N')
     $registrationProviders=@(
@@ -274,7 +275,6 @@ try{
         Assert ($resetPreviewFailure[-1].message -like '*SHGetKnownFolderPath failed*HRESULT*') 'Reset preview did not fail closed when Windows supplied no default paths'
     }
     'PASS: configuration check matches PowerShell paths, registry state, SID, registration and health; custom paths stay contained'
-    $sid=[string](& $module { Get-UserSid })
     $backupKey='Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders'
     $backupBase=[pscustomobject]@{
         Version=1;Sid=$sid;Key=$backupKey;CreatedUtc=[DateTime]::UtcNow.ToString('o');Extension='ignored like PowerShell'
