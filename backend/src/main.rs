@@ -734,6 +734,14 @@ fn normalize_local_path(path: &Path) -> Result<PathBuf> {
     Ok(full)
 }
 
+fn normalize_registered_root(root: &str) -> Result<String> {
+    let path = Path::new(root);
+    if !path.is_absolute() {
+        return Err("A registered iCloud root must be an absolute local path.".into());
+    }
+    text(&normalize_local_path(path)?)
+}
+
 fn enumerate_subkeys(key: HKEY) -> Result<Vec<String>> {
     const MAX_SUBKEYS: u32 = 4096;
     let mut names = Vec::new();
@@ -826,9 +834,7 @@ fn registered_roots(sid: &str) -> Result<Vec<String>> {
         };
         entries.push((name, registry_string(values.0, sid)?));
     }
-    collect_registered_icloud_roots(entries, |root| {
-        text(&normalize_local_path(Path::new(root))?)
-    })
+    collect_registered_icloud_roots(entries, normalize_registered_root)
 }
 
 fn inspect(map: &[Mapping]) -> Result<Vec<RegistryValue>> {
@@ -2895,7 +2901,7 @@ mod tests {
                 ("OtherProvider!Ignored".into(), Some("C:\\Ignored".into())),
                 ("iCloudDrive!NoUserRoot".into(), None),
             ],
-            |root| text(&normalize_local_path(Path::new(root))?),
+            normalize_registered_root,
         )
         .unwrap();
         assert_eq!(
@@ -2906,9 +2912,21 @@ mod tests {
             ]
         );
 
+        let relative = collect_registered_icloud_roots(
+            [(
+                "iCloudDrive!Relative".into(),
+                Some("relative-registration-path".into()),
+            )],
+            normalize_registered_root,
+        );
+        assert!(
+            relative.is_err(),
+            "a relative registered root was accepted"
+        );
+
         let malformed = collect_registered_icloud_roots(
             [("iCloudDrive!Malformed".into(), Some("C:\\NUL".into()))],
-            |root| text(&normalize_local_path(Path::new(root))?),
+            normalize_registered_root,
         );
         assert!(
             malformed.is_err(),
