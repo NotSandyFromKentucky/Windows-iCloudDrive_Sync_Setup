@@ -173,7 +173,20 @@ try{
         Assert $malformedPowerShell 'PowerShell accepted a relative registered root in the malformed-path fixture'
         Assert ($malformedNative[-1].message) 'Rust failed without reporting the malformed registration path'
         'PASS: native registration enumeration refuses a malformed current-SID root like the PowerShell reference'
-    } finally {
+} catch {
+    if($env:RUNNER_TEMP){
+        $assertionPath=Join-Path $env:RUNNER_TEMP 'ICloudNativeBackendAssertion.txt'
+        if(-not (Test-Path -LiteralPath $assertionPath)){
+            $safeMessage=$_.Exception.Message
+            if($safeMessage -like 'Unexpected result:*' -or $safeMessage -match '(?i)(?:[a-z]:\\|\\\\)'){
+                $safeMessage='Guarded native backend validation failed; result or path details were withheld.'
+            }
+            $safeMessage=$safeMessage -replace '[\r\n]',' ' -replace '%','%25' -replace ':','%3A' -replace ',','%2C'
+            [IO.File]::WriteAllText($assertionPath,$safeMessage,(New-Object Text.UTF8Encoding($false)))
+        }
+    }
+    throw
+} finally {
         try{foreach($providerName in $registrationOwned){$registrationBase.DeleteSubKeyTree($providerName,$false)}}finally{$registrationBase.Dispose()}
     }
     Assert ($check.errors.Count -eq $referenceCheck.Errors.Count) 'Rust and PowerShell checker error counts differ'
