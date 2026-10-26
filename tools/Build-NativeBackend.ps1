@@ -93,7 +93,8 @@ try{
     foreach($command in $commands){
         $stdout=Join-Path $output ($command+'.stdout.txt');$stderr=Join-Path $output ($command+'.stderr.txt')
         $info=New-Object Diagnostics.ProcessStartInfo
-        $info.FileName=$cargo;$info.Arguments=$command+' --locked --manifest-path "'+$manifest+'" --release'
+        $features=if($Test){' --features test-injection'}else{''}
+        $info.FileName=$cargo;$info.Arguments=$command+' --locked --manifest-path "'+$manifest+'" --release'+$features
         $info.UseShellExecute=$false;$info.CreateNoWindow=$true
         $info.RedirectStandardOutput=$true;$info.RedirectStandardError=$true
         $process=[Diagnostics.Process]::Start($info)

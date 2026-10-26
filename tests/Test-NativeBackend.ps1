@@ -29,11 +29,13 @@ function Assert($Value,[string]$Message){
         throw 'Native backend assertion failed.'
     }
 }
-function Invoke-Worker([string]$Request,[bool]$Success=$true){
+function Invoke-Worker([string]$Request,[bool]$Success=$true,[string]$FailRegistryWriteName){
     $info=New-Object Diagnostics.ProcessStartInfo
     $info.FileName=$WorkerPath;$info.UseShellExecute=$false;$info.CreateNoWindow=$true
     $info.RedirectStandardInput=$true;$info.RedirectStandardOutput=$true;$info.RedirectStandardError=$true
     $info.StandardOutputEncoding=New-Object Text.UTF8Encoding($false)
+    $info.EnvironmentVariables.Remove('ICLOUD_TEST_FAIL_REGISTRY_WRITE_NAME')
+    if($FailRegistryWriteName){$info.EnvironmentVariables['ICLOUD_TEST_FAIL_REGISTRY_WRITE_NAME']=$FailRegistryWriteName}
     $process=[Diagnostics.Process]::Start($info)
     try{
         $out=$process.StandardOutput.ReadToEndAsync();$err=$process.StandardError.ReadToEndAsync()
@@ -556,6 +558,14 @@ try{
             $resetApplyPreview=Invoke-Worker '{"version":1,"operation":"reset_preview","allow_existing_content":true}'
             $resetApproval=[string]$resetApplyPreview[0].approval_token
             Assert ($resetApproval -match '^[A-Fa-f0-9]{64}$' -and $resetApplyPreview[0].preview.review_gates_passed) 'Isolated reset preview was not ready to apply'
+            $failedResetRequest=([ordered]@{version=1;operation='reset_apply';allow_existing_content=$true;confirmed=$true;preview_token=$resetApproval}|ConvertTo-Json -Compress)
+            $failedReset=Invoke-Worker $failedResetRequest $false 'Pictures'
+            Assert ($failedReset[-1].message -like '*Windows error 6*Rollback verified.*') 'Injected native registry failure did not return the Win32 error after verified rollback'
+            foreach($originalValue in $writtenBackup.Values){
+                $actualValue=& $module {param($name) Read-FolderValue $name} $originalValue.Name
+                Assert ($actualValue.Exists -eq $originalValue.Exists -and [string]::Equals($actualValue.Kind,$originalValue.Kind,[StringComparison]::Ordinal) -and [string]::Equals($actualValue.Data,$originalValue.Data,[StringComparison]::Ordinal)) ('Native rollback after a Win32 write failure did not restore '+$originalValue.Name)
+            }
+            'PASS: injected Win32 registry error triggers checked rollback and restores exact values'
             $resetWrite=Invoke-Worker (([ordered]@{version=1;operation='reset_apply';allow_existing_content=$true;confirmed=$true;preview_token=$resetApproval}|ConvertTo-Json -Compress))
             $resetWriteResult=@($resetWrite|Where-Object type -ceq 'settings_apply')
             Assert ($resetWriteResult.Count -eq 1 -and $resetWriteResult[0].operation -ceq 'reset' -and $resetWriteResult[0].recovery_backup -and $resetWrite[-1].read_only -eq $false) 'Native reset Apply returned no recovery backup or incorrect write state'

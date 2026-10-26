@@ -6,7 +6,11 @@ Commits `582262b` and `886b3b6` add Rust UI high-contrast rendering coverage and
 
 GitHub run `40393815756` for `582262b` still appeared In progress after more than 15 minutes. Its Rust integration job had a 15-minute timeout and now includes package and high-contrast checks, so that job timeout is raised to 25 minutes for the next run. Anonymous GitHub API access is rate-limited and the run page does not expose logs; the Rust high-contrast hosted test is therefore not yet verified. The real `.git/index` remains intentionally absent; keep using a fresh alternate index for Git review and commits.
 
-Actual iCloud hydration/copy, a forced Win32 registry-write failure, paged large-copy review, cancellation during copy preflight, hostile concurrent ancestor swaps, physical Narrator/external assistive-technology and mixed-DPI acceptance, and production routing remain open. Continue to keep the Rust frontend and worker opt-in; do not publish a release or move tags for prototype readiness.
+Actual iCloud hydration/copy, the hosted test-only Win32 registry-failure/rollback check, paged large-copy review, cancellation during copy preflight, hostile concurrent ancestor swaps, physical Narrator/external assistive-technology and mixed-DPI acceptance, and production routing remain open. A real iCloud round-trip fixture was created in the registered Documents folder; its matching remote rename is still required to verify cloud return. Continue to keep the Rust frontend and worker opt-in; do not publish a release or move tags for prototype readiness.
+
+## Continuation handoff - 2026-10-26 (Rust registry failure injection)
+
+`Build-NativeBackend.ps1 -Test` now enables a test-only feature in its immutable worker snapshot. In the hosted guarded registry integration, a one-shot test variable makes the adapter pass an invalid handle to `RegSetValueExW`, exercising an actual Win32 failure status; the worker must restore exact values in reverse order before the ordinary reset/restore cases continue. Non-test builds do not compile this injection hook. Local `-Test` build passed all 26 Rust unit tests and compiled the worker; the non-test worker also built successfully. PowerShell parsing and Rust formatting pass. This hosted failure/rollback assertion has not yet run and must pass in CI before closing the rollback gate.
 
 ## Continuation handoff - 2026-10-26 (Rust native copy preview and Apply)
 

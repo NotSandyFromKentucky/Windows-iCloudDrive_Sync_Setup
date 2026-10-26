@@ -1613,6 +1613,11 @@ impl FolderRegistry for CurrentUserFolderRegistry {
 fn write_named_folder_value(name: &str, value: &StoredFolderValue) -> Result<()> {
     let key = open_key(HKEY_CURRENT_USER, SHELL_KEY, KEY_SET_VALUE)?
         .ok_or("The current-user folder settings key is unavailable.")?;
+    let write_key = if test_registry_write_failure(name) {
+        1usize as HKEY
+    } else {
+        key.0
+    };
     let name_wide = wide(name);
     let status = if value.exists {
         let data = value
@@ -1632,7 +1637,7 @@ fn write_named_folder_value(name: &str, value: &StoredFolderValue) -> Result<()>
         // is checked before it is passed to the registry API.
         unsafe {
             RegSetValueExW(
-                key.0,
+                write_key,
                 name_wide.as_ptr(),
                 0,
                 kind,
@@ -1642,7 +1647,7 @@ fn write_named_folder_value(name: &str, value: &StoredFolderValue) -> Result<()>
         }
     } else {
         // SAFETY: key is open for value writes and name is NUL-terminated.
-        unsafe { RegDeleteValueW(key.0, name_wide.as_ptr()) }
+        unsafe { RegDeleteValueW(write_key, name_wide.as_ptr()) }
     };
     if status == ERROR_SUCCESS || (!value.exists && status == ERROR_FILE_NOT_FOUND) {
         Ok(())
@@ -1652,6 +1657,25 @@ fn write_named_folder_value(name: &str, value: &StoredFolderValue) -> Result<()>
             if value.exists { "write" } else { "remove" }
         ))
     }
+}
+
+#[cfg(feature = "test-injection")]
+fn test_registry_write_failure(name: &str) -> bool {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static INJECTED: AtomicBool = AtomicBool::new(false);
+    std::env::var("ICLOUD_TEST_FAIL_REGISTRY_WRITE_NAME")
+        .ok()
+        .is_some_and(|requested| {
+            requested == name
+                && INJECTED
+                    .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
+        })
+}
+
+#[cfg(not(feature = "test-injection"))]
+fn test_registry_write_failure(_name: &str) -> bool {
+    false
 }
 
 fn apply_checked_transaction(
