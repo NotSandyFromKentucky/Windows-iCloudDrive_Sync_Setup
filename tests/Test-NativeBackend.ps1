@@ -137,7 +137,9 @@ try{
     $checkRecords=Invoke-Worker $checkRequest
     $check=$checkRecords[0].check
     Assert ($checkRecords[0].type -ceq 'check' -and $check.registry_values.Count -eq $expected.Count) 'Read-only check omitted mapped registry aliases'
-    Assert ($check.resolved_folders.Count -eq 7 -and $check.cloud_sync -ceq 'Not verified by this read-only check.') 'Read-only check omitted resolved folders or overstated cloud verification'
+    $resolvedCheckCount=@($check.resolved_folders).Count
+    Assert ($resolvedCheckCount -eq $expectedCurrent.Count) ('Read-only check resolved '+$resolvedCheckCount+' current folders; PowerShell resolved '+$expectedCurrent.Count)
+    Assert ($check.cloud_sync -ceq 'Not verified by this read-only check.') 'Read-only check overstated cloud verification'
     $referenceCheck=@(& $module {param($root) Test-ICloudFolderSetup -ICloudRoot $root -IncludeMusic} $fixture)
     Assert ($check.root_exists -eq $referenceCheck.RootExists -and $check.root_registered -eq $referenceCheck.RootRegistered) 'Rust root existence or registration differs from the PowerShell checker'
     Assert ($check.user_sid -ceq $referenceCheck.UserSid) 'Rust current-user SID differs from the PowerShell checker'
