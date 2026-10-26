@@ -156,6 +156,7 @@ try{
         Assert (-not [RustUIProbe]::IsWindowEnabled((Control 3))) 'Path edit retained stale review'
     }
     Set-Content (Join-Path $fixture 'mode.txt') 'normal'
+    $expectedActions=@{0='Set up iCloud folders';1='Reset to Windows defaults';2='Restore a recovery backup';3='Copy files into iCloud folders';4='Copy files into Windows default folders';6='Create cloud test file';8='Clean up cloud test file'}
     foreach($index in @(0,1,2,3,4,6,8)){
         Choose $index
         [RustUIProbe]::SetText((Control 111),(Join-Path $fixture 'before.json'))
@@ -165,10 +166,12 @@ try{
         Confirm $true;Wait-Status '*Fixture completed*'
         Wait-For {[RustUIProbe]::IsWindowEnabled((Control 1))} 'Apply did not finish'
         $captured=Get-Content (Join-Path $fixture 'requests.jsonl') -Tail 1|ConvertFrom-Json
-        Assert ($captured.Phase -eq 'Apply') 'Confirmed action did not reach fixture'
+        Assert ($captured.Phase -eq 'Apply' -and $captured.Action -ceq $expectedActions[$index]) ('Confirmed '+$expectedActions[$index]+' action did not reach the compatibility bridge unchanged')
         Assert (-not [RustUIProbe]::IsWindowEnabled((Control 3))) 'Apply retained review for repeated writes'
     }
     Choose 7;Click 1;Wait-Status '*Fixture completed*'
+    $captured=Get-Content (Join-Path $fixture 'requests.jsonl') -Tail 1|ConvertFrom-Json
+    Assert ($captured.Action -ceq 'Check cloud return' -and $captured.Phase -eq 'Preview') 'Cloud return check did not use the read-only compatibility route'
     Assert (-not [RustUIProbe]::IsWindowVisible((Control 3))) 'Read-only action displays Apply'
     Click 6;Wait-Status '*Fixture completed*'
     Assert ([RustUIProbe]::IsWindowVisible((Control 115))) 'Structured configuration table missing'
@@ -180,6 +183,13 @@ try{
     Assert ($tableProbe.msaa_name -eq 'Folder results') ('Results table MSAA name mismatch (actual: "'+$tableProbe.msaa_name+'", UIA name: "'+$tableProbe.uia_name+'")')
     Assert ($tableProbe.uia_name -eq 'Folder results') ('Results table UIA name mismatch (actual: "'+$tableProbe.uia_name+'")')
     [RustUIProbe]::Screenshot($window,(Join-Path $evidence ('check-dpi-'+$dpi+'.png')))
+    if($dpi -eq 96){
+        Post-Click 122
+        Confirm $true;Wait-Status '*Fixture completed*'
+        $captured=Get-Content (Join-Path $fixture 'requests.jsonl') -Tail 1|ConvertFrom-Json
+        Assert ($captured.Action -ceq 'Install for me' -and $captured.Phase -eq 'Apply' -and -not $captured.DesktopShortcut) 'Install confirmation did not route its reviewed options to the compatibility bridge'
+        'PASS: Rust UI cloud-test and Install routes preserve action, phase and reviewed options through the compatibility bridge'
+    }
     Click 114;Assert ([RustUIProbe]::IsWindowVisible((Control 103))) 'Technical details toggle failed';Click 114
     Choose 3;Click 1;Wait-Status '*Fixture completed*'
     Set-Content (Join-Path $fixture 'mode.txt') 'copy'
@@ -207,7 +217,7 @@ try{
     [RustUIProbe]::PostMessage($window,0x0010,[IntPtr]::Zero,[IntPtr]::Zero)|Out-Null
     Assert ($process.WaitForExit(10000) -and $process.ExitCode -eq 0) 'UI did not close cleanly'
     $process.Dispose();$process=$null
-    $results+=[pscustomobject]@{Dpi=$dpi;ActionRoutes=$true;Confirmation=$true;ReviewInvalidation=$true;StructuredTable=$true;CooperativeCopyStop=$true;WritesNotTerminated=$true}
+    $results+=[pscustomobject]@{Dpi=$dpi;ActionRoutes=$true;CloudTestBridge=$true;InstallBridge=($dpi -eq 96);Confirmation=$true;ReviewInvalidation=$true;StructuredTable=$true;CooperativeCopyStop=$true;WritesNotTerminated=$true}
     'PASS: DPI '+$dpi+' action routes, preview binding, confirmation/cancel, table, progress, safe copy stop, write protection, output bounds and clean close'
     Remove-Item -LiteralPath (Join-Path $fixture 'requests.jsonl') -Force
  }
