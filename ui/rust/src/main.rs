@@ -2976,6 +2976,60 @@ impl State {
         } else if self
             .running_options
             .as_ref()
+            .map(|options| options.action == "Reset to Windows defaults")
+            .unwrap_or(false)
+        {
+            if let Ok(report) = serde_json::from_str::<serde_json::Value>(result.text.trim()) {
+                if let Some(values) = report["Rows"].as_array() {
+                    self.set_table_headers([
+                        "Folder",
+                        "Current location",
+                        "Windows default",
+                        "Planned action",
+                    ]);
+                    unsafe {
+                        SendMessageW(self.table, LVM_DELETEALLITEMS, 0, 0);
+                    }
+                    let rows: Vec<[String; 4]> = values
+                        .iter()
+                        .map(|row| {
+                            [
+                                row["Folder"].as_str().unwrap_or("Folder").to_owned(),
+                                row["Current"].as_str().unwrap_or("Not set").to_owned(),
+                                row["Proposed"].as_str().unwrap_or("Unavailable").to_owned(),
+                                row["Action"].as_str().unwrap_or("Review").to_owned(),
+                            ]
+                        })
+                        .collect();
+                    self.insert_result_rows(&rows);
+                    self.table_ready = true;
+                    let gate_status = if report["ReviewGatesPassed"] == true {
+                        "Review checks passed. No settings or files have changed."
+                    } else {
+                        "Review checks need attention. Apply remains unavailable."
+                    };
+                    let warnings = report["ContentWarnings"]
+                        .as_array()
+                        .map(|items| {
+                            items
+                                .iter()
+                                .filter_map(|item| item.as_str())
+                                .collect::<Vec<_>>()
+                                .join("\r\n")
+                        })
+                        .unwrap_or_default();
+                    self.friendly = format!(
+                        "{}\r\nWindows defaults\r\nRecovery folder: {} (a backup is created only after you apply)\r\n{}\r\n{}",
+                        result.message,
+                        report["RecoveryRoot"].as_str().unwrap_or("Unavailable"),
+                        gate_status,
+                        warnings
+                    );
+                }
+            }
+        } else if self
+            .running_options
+            .as_ref()
             .map(|options| options.action == "Restore a recovery backup")
             .unwrap_or(false)
         {
