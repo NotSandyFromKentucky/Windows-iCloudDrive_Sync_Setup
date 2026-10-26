@@ -219,6 +219,7 @@ struct State {
     keep: HWND,
     technical: HWND,
     table: HWND,
+    table_label: HWND,
     dry: HWND,
     browse_root: HWND,
     browse_backup: HWND,
@@ -1640,6 +1641,10 @@ impl State {
                 DESKTOP_SHORTCUT,
             )?
         };
+        // MSAA's common-controls proxy names ListViews from a preceding static
+        // label. Keep this label directly before the results control in child
+        // creation order and expose the same name through direct annotation.
+        let table_label = unsafe { control(window, "STATIC", "Folder results", SS_LEFT, 404)? };
         let table = unsafe {
             control(
                 window,
@@ -1801,6 +1806,7 @@ impl State {
             keep,
             technical,
             table,
+            table_label,
             dry,
             browse_root,
             browse_backup,
@@ -1949,6 +1955,7 @@ impl State {
                 self.keep,
                 self.technical,
                 self.table,
+                self.table_label,
                 self.dry,
                 self.browse_root,
                 self.browse_backup,
@@ -2032,6 +2039,7 @@ impl State {
                 self.root,
                 self.music,
                 self.advanced,
+                self.table_label,
                 self.status,
                 self.preview,
                 self.apply,
@@ -2523,9 +2531,18 @@ impl State {
                 status_width,
                 technical_h,
             );
+            let table_top = result_top + scaled(24, self.dpi);
             let result_height = (viewport - result_top - 8).max(80);
+            let table_height = (viewport - table_top - 8).max(80);
             put(self.status, status_x, result_top, status_width, result_height);
-            put(self.table, status_x, result_top, status_width, result_height);
+            put(
+                self.table_label,
+                status_x,
+                result_top,
+                status_width,
+                scaled(20, self.dpi),
+            );
+            put(self.table, status_x, table_top, status_width, table_height);
 
             let column0 = (status_width * 42 / 100).clamp(130, 180);
             let column2 = if status_width < 360 { 56 } else { 64 };
@@ -2544,6 +2561,14 @@ impl State {
             }
             ShowWindow(
                 self.table,
+                if self.table_ready && !checked(self.technical) {
+                    SW_SHOW
+                } else {
+                    SW_HIDE
+                },
+            );
+            ShowWindow(
+                self.table_label,
                 if self.table_ready && !checked(self.technical) {
                     SW_SHOW
                 } else {

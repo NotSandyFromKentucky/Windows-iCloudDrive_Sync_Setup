@@ -7,6 +7,7 @@ if(-not $env:ICLOUD_TEST_DESKTOP){& (Join-Path $PSScriptRoot 'Invoke-HiddenDeskt
 if(& (Join-Path $PSScriptRoot 'Enter-TestDesktop.ps1') -ScriptPath $PSCommandPath){return}
 if($RunNativeIntegration){$isolation=& (Join-Path $PSScriptRoot 'Assert-IsolatedEnvironment.ps1');if($isolation -notin @('GitHubHosted','WindowsSandbox')){throw 'Native UI integration tests require a disposable Windows environment.'}}
 Add-Type -AssemblyName System.Drawing,Accessibility
+Add-Type -AssemblyName UIAutomationClient,UIAutomationTypes
 Add-Type -Path (Join-Path $PSScriptRoot 'RustUIProbe.cs') -ReferencedAssemblies System.Drawing,Accessibility
 function Assert($Value,[string]$Message){if(-not $Value){throw $Message}}
 function Wait-For([scriptblock]$Condition,[string]$Message){$end=[DateTime]::UtcNow.AddSeconds(20);while([DateTime]::UtcNow -lt $end){if(& $Condition){return};Start-Sleep -Milliseconds 30};throw $Message}
@@ -46,6 +47,9 @@ function Start-UIWithEnvironment([string]$Arguments,[hashtable]$Environment){
 }
 $fixture=Join-Path ([IO.Path]::GetTempPath()) ('ICloudRustUIFixture-'+[guid]::NewGuid().ToString('N'))
 $null=[IO.Directory]::CreateDirectory((Join-Path $fixture 'tools'))
+$accessibilityProbe=Join-Path $fixture 'RustUIAccessibilityProbe.exe'
+$automationReferences=@('System.dll',([Windows.Automation.AutomationElement].Assembly.Location),([Windows.Automation.ControlType].Assembly.Location),([Accessibility.IAccessible].Assembly.Location))
+Add-Type -Path (Join-Path $PSScriptRoot 'RustUIAccessibilityProbe.cs') -ReferencedAssemblies $automationReferences -OutputType ConsoleApplication -OutputAssembly $accessibilityProbe
 $stub=@'
 param([string]$EncodedRequest)
 $ErrorActionPreference='Stop'
@@ -128,7 +132,12 @@ try{
     Click 6;Wait-Status '*Fixture completed*'
     Assert ([RustUIProbe]::IsWindowVisible((Control 115))) 'Structured configuration table missing'
     Assert ([RustUIProbe]::Send((Control 115),0x1004,[IntPtr]::Zero,[IntPtr]::Zero).ToInt32() -eq 3) 'Configuration table has incorrect row count'
-    Assert ([RustUIProbe]::AccessibleName((Control 115)) -eq 'Folder results') 'Table lacks accessible name'
+    $tableProbeText=& $accessibilityProbe $process.Id 115
+    Assert ($LASTEXITCODE -eq 0) 'Standalone accessibility provider probe failed for the results table'
+    $tableProbe=$tableProbeText|ConvertFrom-Json
+    Assert ($tableProbe.uia_type -eq 'ControlType.DataGrid') ('Results table has wrong UIA control type: '+$tableProbe.uia_type)
+    Assert ($tableProbe.msaa_name -eq 'Folder results') ('Results table MSAA name mismatch (actual: "'+$tableProbe.msaa_name+'", UIA name: "'+$tableProbe.uia_name+'")')
+    Assert ($tableProbe.uia_name -eq 'Folder results') ('Results table UIA name mismatch (actual: "'+$tableProbe.uia_name+'")')
     [RustUIProbe]::Screenshot($window,(Join-Path $evidence ('check-dpi-'+$dpi+'.png')))
     Click 114;Assert ([RustUIProbe]::IsWindowVisible((Control 103))) 'Technical details toggle failed';Click 114
     Choose 3;Click 1;Wait-Status '*Fixture completed*'
