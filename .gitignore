@@ -9,3 +9,8 @@ before.json
 /RestoreRegistry.bat
 /ui/**/bin/
 /ui/**/obj/
+/backend/target/
+/ui/rust/target/
+/ui/rust-launcher/target/
+/icloud-folder-launcher.exe
+/NativeUI/

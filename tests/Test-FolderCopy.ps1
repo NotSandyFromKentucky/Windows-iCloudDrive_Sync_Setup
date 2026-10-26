@@ -1,7 +1,8 @@
 #requires -Version 5.1
 $ErrorActionPreference='Stop'
 $repo=Split-Path $PSScriptRoot -Parent
-$fixture=Join-Path $repo ('.test-copy-'+[guid]::NewGuid().ToString('N'))
+$fixtureRoot=[IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\')
+$fixture=Join-Path $fixtureRoot ('.test-copy-'+[guid]::NewGuid().ToString('N'))
 $null=[IO.Directory]::CreateDirectory($fixture)
 function Assert($Condition,$Message){if(-not $Condition){throw $Message}}
 function Fail([scriptblock]$Action,[string]$Pattern){$message=$null;try{& $Action}catch{$message=$_.Exception.Message};Assert ($message -like ('*'+$Pattern+'*')) ("Expected "+$Pattern+"; got "+$message)}
@@ -148,5 +149,5 @@ try{
 }finally{
     Remove-Module $module -Force
     $full=[IO.Path]::GetFullPath($fixture)
-    if($full.StartsWith([IO.Path]::GetFullPath($repo).TrimEnd('\')+'\.test-copy-',[StringComparison]::OrdinalIgnoreCase)){Remove-Item -LiteralPath $full -Recurse -Force}
+    if($full.StartsWith($fixtureRoot+'\.test-copy-',[StringComparison]::OrdinalIgnoreCase) -and [IO.Path]::GetFileName($full) -match '^\.test-copy-[a-f0-9]{32}$'){Remove-Item -LiteralPath $full -Recurse -Force}
 }

@@ -1,10 +1,17 @@
 # Repository guidance
 
 - Read `README.md` and `docs/CONTEXT.md` for scope and implementation decisions.
+- Start continuation work with the dated handoff in `docs/CONTEXT.md`; distinguish completed changes, measured prototypes and proposed work. Rust is selected for the read-only backend migration prototype; production still uses PowerShell and no replacement UI framework has been selected.
+- Preserve existing staging and local changes. This checkout has had an intentionally absent `.git/index`; recheck it before Git writes and follow the alternate-index instructions in `docs/DEVELOPMENT.md`. Never reconstruct the real index or commit apparent mass deletions.
 - Keep folder mappings centralized in `Get-FolderMap` and consistent across aliases. Do not add OneDrive or unrelated profile entries.
 - Preserve read-only default execution, `ShouldProcess`, exact backups, checked writes, and rollback that removes originally absent values.
 - Never run live folder redirection or restore on the developer's account as a test. Use the fake-registry suite; integration testing belongs in an isolated account or VM.
 - Run `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-ICloudFolders.ps1` after behavioral changes. The override applies only to that process.
+- After copy behavior changes, also run `tests/Test-FolderCopy.ps1` under Windows PowerShell 5.1 and PowerShell 7. Preserve complete conflict preflight, hash verification, original files and safe cancellation boundaries.
+- Run GUI automation on the hidden desktop through `tests/Invoke-HiddenDesktop.ps1`; never switch the active desktop or steal focus. When you (the agent) launch the UI to investigate or test, always use the hidden desktop — direct launches steal focus from the user's active session. Build native packages from immutable snapshots outside iCloud Drive and preserve cloud conflict copies.
+- Report memory measurements with their workload and metric: total working set, private working set and private bytes are different. Include required helper processes; do not claim gains from forced GC or working-set trimming, or treat an empty-process baseline as a complete backend measurement.
+- Keep the experimental Rust worker read-only until backup/rollback, mapping, path safety and guarded integration parity are demonstrated. Generate its metadata from `Get-FolderMap` during an outside-cloud snapshot build; never maintain a second hand-written mapping. Run its Rust unit tests and `tests/Test-NativeBackend.ps1` after changes.
+- Keep the Rust UI an explicit read-only development preview until confirmation, current-preview binding, restore, cancellation and packaging parity are verified. Never terminate write operations to implement cancellation. Run `tests/Test-RustUI.ps1` on the hidden desktop and `tests/Test-RustLaunchRouting.ps1` after UI/routing changes; report native MSAA and UI Automation verification separately.
 - Also run the Explorer launcher and diagnostic suites after changing their behavior. Real-registry tests may run only behind `tests/Assert-IsolatedEnvironment.ps1` in disposable Windows Sandbox or GitHub-hosted Windows VMs, never a developer account or self-hosted runner.
 - Do not add automatic file migration, delete source content, or commit registry exports, personal backups, logs, or IDE state.
 - Update the README and context when behavior changes. Document unverified Windows/iCloud integration honestly.

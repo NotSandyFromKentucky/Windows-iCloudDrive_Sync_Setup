@@ -71,6 +71,34 @@ jobs:
           path: ${{ runner.temp }}/ICloudIntegrationResults
           if-no-files-found: warn
           retention-days: 14
+  native-backend:
+    name: Read-only Rust backend prototype
+    runs-on: windows-2025
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build locked Rust snapshot and run safety fixtures
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $isolation = ./tests/Assert-IsolatedEnvironment.ps1
+          if ($isolation -ne 'GitHubHosted') { throw 'Expected a GitHub-hosted Windows runner.' }
+          rustc --version
+          $build = ./tools/Build-NativeBackend.ps1 -Test
+          ./tests/Test-NativeCopyPlan.ps1 -WorkerPath $build.WorkerPath
+          ./tests/Test-NativeBackend.ps1 -WorkerPath $build.WorkerPath
+          ./tests/Test-NativeCloudFiles.ps1 -Snapshot $build.Snapshot
+      - name: Build Rust UI and verify fixture parity and package behavior
+        shell: powershell
+        run: |
+          $backend = ./tools/Build-NativeBackend.ps1
+          $build = ./tools/Build-RustUI.ps1 -Test
+          ./tests/Test-RustUI.ps1 -WorkerPath $build.WorkerPath -BackendWorkerPath $backend.WorkerPath -RunNativeIntegration
+          ./tests/Test-RustLaunchRouting.ps1
+          $package = ./tools/New-RustUIPackage.ps1 -BuildInfo (Join-Path $build.Snapshot 'build-info.json') -BackendBuildInfo (Join-Path $backend.Snapshot 'build-info.json')
+          ./tests/Test-RustUIPackage.ps1 -PackageDirectory $package.Directory -RunNativeIntegration
   native-ui:
     name: Native WinUI build and hidden-desktop fixtures
     runs-on: windows-2025

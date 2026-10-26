@@ -23,7 +23,7 @@ Registration confirms the configured Drive path, not synchronization health. See
 
 ## Use the graphical window
 
-Choose an action and its options, then click **Preview / Check** or **Dry run**. Review the displayed paths and warnings. An action-specific button becomes available only after a successful preview/dry run of the same options. Its confirmation names the action, with Cancel selected by default. Changing options invalidates the reviewed preview. The window remains responsive while operations run and cannot close until they finish. Content scrolls at smaller sizes while action buttons remain visible. Results use plain language; select **Technical details** for raw output and exit codes. Path fields and advanced options also expose their explanations to assistive technology.
+Choose an action and its options, then click **Preview / Check** or **Dry run**. Review the displayed paths and warnings. An action-specific button becomes available only after a successful preview/dry run of the same options. Its confirmation names the action, with Cancel selected by default. Changing options invalidates the reviewed preview. The window remains responsive while operations run and cannot close until they finish. The production window scrolls at smaller sizes while action buttons remain visible; the experimental Rust UI adapts its two-pane layout without a main-window scrollbar. It uses Windows light/dark colors, pairs the system accent with restrained cloud blue, and keeps system colors in high contrast. Windows' native confirmation task dialog remains system-drawn and may stay light. Results use plain language; select **Technical details** for raw output and exit codes. Path fields and advanced options also expose their explanations to assistive technology.
 
 | Action | What it does |
 | --- | --- |
@@ -84,6 +84,8 @@ A reset obtains defaults from Windows without reading old backups. It still requ
 
 Save work, sign out/in, and verify Explorer paths and application save locations. Retain backups and source files until checked. Check an ordinary file through iCloud.com or another device; local diagnostics cannot prove cloud synchronization. The configuration checker expects iCloud destinations and reports mismatches after an intentional reset to local defaults.
 
+Changing folder locations does not add Quick access pins. If Desktop, Pictures or another folder is missing from Explorer's left panel, open **Home**, click the **Up** arrow beside the address bar, then right-click the missing folder and choose **Pin to Quick access**. You can also pin its configured destination directly. Do not repeat Apply merely to restore a sidebar shortcut. See [Microsoft's File Explorer instructions](https://support.microsoft.com/en-gb/windows/experience/fileexplorer/file-explorer-in-windows).
+
 A real round trip passed on 2026-10-18 with iCloud for Windows 15.10.39.0. That result applies to one installation and time, not ongoing health or every application. See [verification evidence and the repeatable procedure](docs/VERIFICATION.md).
 
 ## Installation details
@@ -92,7 +94,19 @@ Application files are copied into unique version directories beneath %LOCALAPPDA
 
 ## Project documentation
 
+Development is also testing a Rust backend and a direct-Win32 Rust UI. The read-only worker includes experimental configuration and setup/reset previews, an in-memory recovery-record snapshot and account-bound backup validation, bounded recovery-file previews, and single-/multi-source copy planning. It derives copy pairs from current registry values and compares proposed folder settings without writing; setup preview checks whether source folders contain content. The snapshot reads mapped current-user registry values but does not create a backup file; validation checks a supplied record but does not restore or change settings. Full copy planning reads content metadata and can hydrate cloud placeholders. The Rust planner recognizes Cloud Files placeholders and hydrates their content through the registered provider in bounded 64 KiB ranges before hashing; a read-only plan may therefore download cloud-only content. It reopens the data stream only after hydration and checks that file identity and metadata remain stable. Other links and unsupported reparse points remain refused. The guarded worker-provider test compiles but has not run on this developer account, and actual iCloud hydration has not been verified. The Rust UI's configuration **Check**, setup **Preview**, and recovery **Dry run** can use the direct Rust worker; restore results show exact current and proposed values, types and removals. Final Apply still uses the PowerShell backend. The worker remains read-only and separate from production, whose entry points continue to use WinUI and PowerShell. The Rust UI has an adaptive two-pane window: configuration on the left, status/results on the right, compact spacing at smaller heights, a pinned command footer and no main-window scrollbar; its minimum client area is 800x470 logical pixels. Its system-theme/accent treatment and accessible action flows are experimental; UI Automation and screen-reader acceptance remain separate gates. See [project context](docs/CONTEXT.md) for measured memory, launch commands and migration status.
+
+The Rust worker also offers read-only restore previews for an in-memory recovery record or a selected JSON file. File previews accept UTF-8 with or without a BOM, refuse files over 4 MiB and reject reparse/encrypted paths. Both forms check the account, allowed values, destination availability and recovery-folder placement, and show exact additions, updates or removals. They do not restore settings. Recovery-file persistence is exercised only by an isolated test helper; the worker protocol remains read-only.
+
+Its unit tests also exercise a fake-registry transaction model with checked read-back, exact rollback and originally absent value removal. This is not a Win32 write implementation; direct registry mutation and isolated integration remain unfinished.
+
+Backup validation accepts property names in any letter casing, matching PowerShell's case-insensitive property lookup, and rejects duplicate names that differ only by casing.
+
+Registry-dependent Rust reads and previews acquire the same per-account Windows mutex as PowerShell setup/reset/restore/copy operations. They fail immediately if another operation owns it, avoiding snapshots taken during a folder-settings transaction.
+
 The v2.4.0 sources use the [native WinUI 3 interface](docs/WINUI.md). Source entry points expect the complete NativeUI payload from the native package. The v2.3.1 and earlier release archives retain their original interface; no release assets have been replaced. Building from source requires the pinned .NET SDK and the native packaging workflow. VERSION also sets the native executable and assembly version.
+
+A source checkout alone cannot launch the native interface. Build a complete native package outside iCloud Drive, or use an already verified matching package; keep its entire NativeUI directory together. Local NativeUI runtime files are ignored by Git. The CMD entry point can briefly display a console while starting; opening NativeUI/ICloudFolderSetup.exe directly avoids the batch-file console and opens Setup mode.
 
 - [Command-line reference](docs/CLI.md)
 - [Architecture and repository structure](docs/CONTEXT.md)

@@ -3,6 +3,20 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $script:ShellKey = 'Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders'
 
+function Get-WindowsKnownFolderIds {
+    # Canonical Windows Known Folder IDs. Keep this map shared by reset planning
+    # and the generated Rust metadata; aliases are resolved through Get-FolderMap.
+    [ordered]@{
+        Desktop='B4BFCC3A-DB2C-424C-B029-7FE99A87C641'
+        Documents='FDD39AD0-238F-46AF-ADB4-6C85480369C7'
+        Pictures='33E28130-4E1E-4676-835A-98395C3BC3BB'
+        Videos='18989B1D-99B5-455B-841C-AB7C74E4DDFC'
+        Downloads='374DE290-123F-4565-9164-39C4925E467B'
+        Captures='EDC0FE71-98D8-4F4A-B920-C8DC133CB165'
+        Music='4BD8D571-6D19-48D3-BE97-422220080E43'
+    }
+}
+
 function Get-FolderMap {
     param([switch]$IncludeMusic, [switch]$SystemDefaults, [string]$Root, [hashtable]$FolderPaths=@{})
     # Registry aliases are deliberately explicit. No OneDrive-specific IDs.
@@ -53,19 +67,11 @@ function Get-FolderMap {
         foreach($name in @($map.Keys)){$id=if($map[$name] -eq 'Videos\Captures'){'Captures'}else{$map[$name]};$map[$name]=$targets[$id]}
     }
     if ($SystemDefaults) {
-        # Canonical Windows IDs, not the local aliases being synchronized above.
-        $ids = @{
-            Desktop='B4BFCC3A-DB2C-424C-B029-7FE99A87C641'
-            Documents='FDD39AD0-238F-46AF-ADB4-6C85480369C7'
-            Pictures='33E28130-4E1E-4676-835A-98395C3BC3BB'
-            Videos='18989B1D-99B5-455B-841C-AB7C74E4DDFC'
-            Downloads='374DE290-123F-4565-9164-39C4925E467B'
-            'Videos\Captures'='EDC0FE71-98D8-4F4A-B920-C8DC133CB165'
-            Music='4BD8D571-6D19-48D3-BE97-422220080E43'
-        }
+        $ids=Get-WindowsKnownFolderIds
         $paths = @{}
         foreach ($folder in @($map.Values | Select-Object -Unique)) {
-            $paths[$folder] = Get-NormalPath (Get-WindowsDefaultFolderPath -Id $ids[$folder])
+            $id=if($folder -eq 'Videos\Captures'){'Captures'}else{$folder}
+            $paths[$folder] = Get-NormalPath (Get-WindowsDefaultFolderPath -Id $ids[$id])
         }
         foreach ($name in @($map.Keys)) { $map[$name] = $paths[$map[$name]] }
     }
@@ -80,8 +86,8 @@ function Get-ICloudFolderDefinitions {
 }
 
 function Get-UserSid { [Security.Principal.WindowsIdentity]::GetCurrent().User.Value }
-function Get-WindowsDefaultFolderPath {
-    param([guid]$Id)
+function Get-WindowsKnownFolderPath {
+    param([guid]$Id,[uint32]$Flags=0,[ValidateSet('Current','Default')][string]$Purpose='Current')
     if (-not ('ICloudFolderSettler.NativeKnownFolders' -as [type])) {
         Add-Type -TypeDefinition @'
 using System;
@@ -96,14 +102,21 @@ namespace ICloudFolderSettler {
     }
     $pointer = [IntPtr]::Zero
     try {
-        # DEFAULT_PATH | NOT_PARENT_RELATIVE | DONT_VERIFY. Never CREATE:
-        # ask Windows for defaults even if parents are redirected or paths absent.
-        $result = [ICloudFolderSettler.NativeKnownFolders]::SHGetKnownFolderPath([ref]$Id,0x4600,[IntPtr]::Zero,[ref]$pointer)
-        if ($result -ne 0) { throw "Windows default-path query failed for $Id (HRESULT $result). No guessed fallback is used." }
+        $result = [ICloudFolderSettler.NativeKnownFolders]::SHGetKnownFolderPath([ref]$Id,$Flags,[IntPtr]::Zero,[ref]$pointer)
+        if ($result -ne 0) { throw "Windows $($Purpose.ToLowerInvariant())-path query failed for $Id (HRESULT $result)." }
         [Runtime.InteropServices.Marshal]::PtrToStringUni($pointer)
     } finally {
         if ($pointer -ne [IntPtr]::Zero) { [Runtime.InteropServices.Marshal]::FreeCoTaskMem($pointer) }
     }
+}
+function Get-WindowsDefaultFolderPath {
+    param([guid]$Id)
+    # DEFAULT_PATH | NOT_PARENT_RELATIVE | DONT_VERIFY. Never CREATE.
+    Get-WindowsKnownFolderPath -Id $Id -Flags 0x4600 -Purpose Default
+}
+function Get-WindowsCurrentFolderPath {
+    param([guid]$Id)
+    Get-WindowsKnownFolderPath -Id $Id -Flags 0 -Purpose Current
 }
 function Get-RecoveryRoot { Get-NormalPath (Join-Path $env:LOCALAPPDATA 'ICloudFolderSettler\Recovery') }
 
