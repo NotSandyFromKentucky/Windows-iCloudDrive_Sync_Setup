@@ -72,7 +72,7 @@ try{
     } catch { $defaultQueryError=$_.Exception.Message }
     if($defaultQueryError){
         $nativeFailure=Invoke-Worker '{"version":1,"operation":"defaults"}' $false
-        Assert ($nativeFailure[-1].message -like '*Windows default-folder lookup failed*HRESULT*') 'Rust did not refuse unavailable Windows defaults explicitly'
+        Assert ($nativeFailure[-1].message -like '*SHGetKnownFolderPath failed*HRESULT*') 'Rust did not refuse unavailable Windows defaults explicitly'
         'PASS: Rust refuses to guess when Windows and the PowerShell reference cannot supply default paths'
     } else {
         $nativeDefaults=(Invoke-Worker '{"version":1,"operation":"defaults"}')[0]
@@ -89,17 +89,35 @@ try{
         foreach($name in $resetMap.Keys){$relative=$expected|Where-Object {$_.value_name -ceq $name}|Select-Object -First 1;$folder=if($relative.relative_path -eq 'Videos\Captures'){'Captures'}else{$relative.relative_path};$default=$expectedDefaults|Where-Object {$_.folder -ceq $folder}|Select-Object -First 1;Assert ([string]::Equals($resetMap[$name],$default.path,[StringComparison]::OrdinalIgnoreCase)) ('Windows reset mapping changed for '+$name)}
         'PASS: Rust resolves Windows default folders through SHGetKnownFolderPath without writes'
     }
-    $expectedCurrent=@(& $module {
-        $ids=Get-WindowsKnownFolderIds
-        foreach($folder in $ids.Keys){[pscustomobject]@{folder=$folder;path=(Get-WindowsCurrentFolderPath -Id $ids[$folder])}}
-    })
-    $nativeCurrent=(Invoke-Worker '{"version":1,"operation":"resolve"}')[0]
-    Assert ($nativeCurrent.type -ceq 'resolved' -and $nativeCurrent.folders.Count -eq $expectedCurrent.Count) 'Rust current-folder lookup returned an incomplete set'
-    foreach($expectedFolder in $expectedCurrent){
-        $actualFolder=@($nativeCurrent.folders|Where-Object {$_.folder -ceq $expectedFolder.folder})
-        Assert ($actualFolder.Count -eq 1 -and [string]::Equals($actualFolder[0].path,$expectedFolder.path,[StringComparison]::OrdinalIgnoreCase)) ('Rust current Known Folder API differs for '+$expectedFolder.folder)
+    $expectedCurrent=@();$currentPathFailures=@()
+    $currentIds=& $module { Get-WindowsKnownFolderIds }
+    foreach($folder in $currentIds.Keys){
+        try{$expectedCurrent+=,[pscustomobject]@{folder=$folder;path=(Get-WindowsCurrentFolderPath -Id $currentIds[$folder])}}
+        catch{$currentPathFailures+=,[pscustomobject]@{folder=$folder;message=$_.Exception.Message}}
     }
-    'PASS: Rust current-folder paths match the Windows API for all seven managed folders'
+    if($currentPathFailures.Count){
+        $nativeCurrentFailure=Invoke-Worker '{"version":1,"operation":"resolve"}' $false
+        $nativeMessage=[string]$nativeCurrentFailure[-1].message
+        $matchingFailure=$false
+        foreach($failure in $currentPathFailures){
+            $hresultMatch=[regex]::Match($failure.message,'HRESULT\s+(-?\d+)')
+            if(-not $hresultMatch.Success){continue}
+            $hresultValue=[int64]::Parse($hresultMatch.Groups[1].Value,[Globalization.CultureInfo]::InvariantCulture)
+            $hresultBits=$hresultValue -band 4294967295
+            $hresultHex='0x'+('{0:X8}' -f $hresultBits)
+            if($nativeMessage -like "*Cannot resolve the Windows current folder for $($failure.folder)*" -and $nativeMessage -like "*HRESULT $hresultHex*"){$matchingFailure=$true;break}
+        }
+        Assert $matchingFailure 'Rust current-folder resolution did not match PowerShell when Windows could not resolve a Known Folder'
+        'PASS: Rust and PowerShell both fail closed for unavailable current Known Folder paths'
+    }else{
+        $nativeCurrent=(Invoke-Worker '{"version":1,"operation":"resolve"}')[0]
+        Assert ($nativeCurrent.type -ceq 'resolved' -and $nativeCurrent.folders.Count -eq $expectedCurrent.Count) 'Rust current-folder lookup returned an incomplete set'
+        foreach($expectedFolder in $expectedCurrent){
+            $actualFolder=@($nativeCurrent.folders|Where-Object {$_.folder -ceq $expectedFolder.folder})
+            Assert ($actualFolder.Count -eq 1 -and [string]::Equals($actualFolder[0].path,$expectedFolder.path,[StringComparison]::OrdinalIgnoreCase)) ('Rust current Known Folder API differs for '+$expectedFolder.folder)
+        }
+        'PASS: Rust current-folder paths match the Windows API for all available managed folders'
+    }
     $checkRequest=@{version=1;operation='check';root=$fixture;include_music=$true}|ConvertTo-Json -Compress
     $checkRecords=Invoke-Worker $checkRequest
     $check=$checkRecords[0].check
@@ -232,7 +250,7 @@ try{
     Assert ($previewOutsideFailure[-1].message -like '*inside the selected iCloud Drive folder*') 'Setup preview accepted a custom path outside its root'
     if($defaultQueryError){
         $resetPreviewFailure=Invoke-Worker '{"version":1,"operation":"reset_preview"}' $false
-        Assert ($resetPreviewFailure[-1].message -like '*Windows default-folder lookup failed*HRESULT*') 'Reset preview did not fail closed when Windows supplied no default paths'
+        Assert ($resetPreviewFailure[-1].message -like '*SHGetKnownFolderPath failed*HRESULT*') 'Reset preview did not fail closed when Windows supplied no default paths'
     }
     'PASS: configuration check matches PowerShell paths, registry state, SID, registration and health; custom paths stay contained'
     $sid=[string](& $module { Get-UserSid })

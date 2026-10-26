@@ -898,7 +898,7 @@ fn known_folder_path(id: &str, flags: u32) -> Result<String> {
     let path = CoTaskMem(raw);
     if status < 0 {
         return Err(format!(
-            "Windows default-folder lookup failed (HRESULT 0x{:08X}).",
+            "SHGetKnownFolderPath failed (HRESULT 0x{:08X}).",
             status as u32
         ));
     }

@@ -18,8 +18,20 @@ $cargo=(Get-Command cargo -CommandType Application -ErrorAction Stop).Source
 $oldTarget=$env:CARGO_TARGET_DIR
 try{
     $env:CARGO_TARGET_DIR=Join-Path $snapshotPath 'target'
-    & $cargo test --locked --manifest-path $manifest --release --test cloud_files_hydration -- --ignored --test-threads=1
-    if($LASTEXITCODE -ne 0){throw 'The guarded Cloud Files hydration probe failed.'}
+    $info=New-Object Diagnostics.ProcessStartInfo
+    $info.FileName=$cargo
+    $info.Arguments='test --locked --manifest-path "'+$manifest+'" --release --test cloud_files_hydration -- --ignored --test-threads=1'
+    $info.UseShellExecute=$false;$info.CreateNoWindow=$true
+    $info.RedirectStandardOutput=$true;$info.RedirectStandardError=$true
+    $process=[Diagnostics.Process]::Start($info)
+    if($null -eq $process){throw 'Cargo could not start the guarded Cloud Files hydration test.'}
+    try{
+        $stdout=$process.StandardOutput.ReadToEndAsync();$stderr=$process.StandardError.ReadToEndAsync()
+        $process.WaitForExit()
+        $stdout.Result | Out-Host
+        $stderr.Result | Out-Host
+        if($process.ExitCode -ne 0){throw 'The guarded Cloud Files hydration probe failed.'}
+    }finally{$process.Dispose()}
 }finally{
     $env:CARGO_TARGET_DIR=$oldTarget
 }
