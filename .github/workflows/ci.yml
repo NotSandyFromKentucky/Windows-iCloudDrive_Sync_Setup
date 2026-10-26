@@ -72,7 +72,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
   native-backend:
-    name: Read-only Rust backend prototype
+    name: Rust backend and UI integration
     runs-on: windows-2025
     timeout-minutes: 15
     steps:
@@ -127,6 +127,7 @@ jobs:
           ./tests/Test-RustLaunchRouting.ps1
           $package = ./tools/New-RustUIPackage.ps1 -BuildInfo (Join-Path $build.Snapshot 'build-info.json') -BackendBuildInfo (Join-Path $backend.Snapshot 'build-info.json')
           ./tests/Test-RustUIPackage.ps1 -PackageDirectory $package.Directory -RunNativeIntegration
+          ./tests/Test-RustUIHighContrast.ps1 -WorkerPath $build.WorkerPath
   native-ui:
     name: Native WinUI build and hidden-desktop fixtures
     runs-on: windows-2025
