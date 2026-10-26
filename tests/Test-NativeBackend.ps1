@@ -19,6 +19,9 @@ function Assert($Value,[string]$Message){
         }
         $safeMessage=$safeMessage -replace '[\r\n]',' ' -replace '%','%25' -replace ':','%3A' -replace ',','%2C'
         Write-Output "::error title=Native backend assertion::$safeMessage"
+        if($env:GITHUB_STEP_SUMMARY -and (Test-Path -LiteralPath $env:GITHUB_STEP_SUMMARY)){
+            [IO.File]::AppendAllText($env:GITHUB_STEP_SUMMARY,"Native backend assertion: $safeMessage`n")
+        }
         throw 'Native backend assertion failed.'
     }
 }
