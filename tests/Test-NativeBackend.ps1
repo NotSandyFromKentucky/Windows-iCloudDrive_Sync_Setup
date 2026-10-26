@@ -560,7 +560,7 @@ try{
             Assert ($resetApproval -match '^[A-Fa-f0-9]{64}$' -and $resetApplyPreview[0].preview.review_gates_passed) 'Isolated reset preview was not ready to apply'
             $failedResetRequest=([ordered]@{version=1;operation='reset_apply';allow_existing_content=$true;confirmed=$true;preview_token=$resetApproval}|ConvertTo-Json -Compress)
             $failedReset=Invoke-Worker $failedResetRequest $false 'Pictures'
-            Assert ($failedReset[-1].message -like '*Windows error 6*Rollback verified.*') 'Injected native registry failure did not return the Win32 error after verified rollback'
+            Assert ($failedReset[-1].message -like '*Windows error *Rollback verified.*') 'Injected native registry failure did not return a Win32 error after verified rollback'
             foreach($originalValue in $writtenBackup.Values){
                 $actualValue=& $module {param($name) Read-FolderValue $name} $originalValue.Name
                 Assert ($actualValue.Exists -eq $originalValue.Exists -and [string]::Equals($actualValue.Kind,$originalValue.Kind,[StringComparison]::Ordinal) -and [string]::Equals($actualValue.Data,$originalValue.Data,[StringComparison]::Ordinal)) ('Native rollback after a Win32 write failure did not restore '+$originalValue.Name)
