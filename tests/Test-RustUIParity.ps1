@@ -53,6 +53,21 @@ function Start-UIWithEnvironment([string]$Arguments,[hashtable]$Environment){
         foreach($name in $names){[Environment]::SetEnvironmentVariable($name,$previous[$name],'Process')}
     }
 }
+function Invoke-NativeBackend([string]$Worker,[string]$Request){
+    $info=New-Object Diagnostics.ProcessStartInfo
+    $info.FileName=$Worker;$info.UseShellExecute=$false;$info.CreateNoWindow=$true
+    $info.RedirectStandardInput=$true;$info.RedirectStandardOutput=$true;$info.RedirectStandardError=$true
+    $info.StandardOutputEncoding=New-Object Text.UTF8Encoding($false)
+    $process=[Diagnostics.Process]::Start($info)
+    try{
+        $stdout=$process.StandardOutput.ReadToEndAsync();$stderr=$process.StandardError.ReadToEndAsync()
+        $bytes=[Text.Encoding]::UTF8.GetBytes($Request)
+        $process.StandardInput.BaseStream.Write($bytes,0,$bytes.Length);$process.StandardInput.Close()
+        if(-not $process.WaitForExit(30000)){throw 'Native backend query timed out'}
+        Assert ($process.ExitCode -eq 0 -and $stderr.Result -eq '') 'Native backend default-path query failed'
+        return @($stdout.Result -split '\r?\n'|Where-Object {$_}|ForEach-Object {$_|ConvertFrom-Json})
+    }finally{if(-not $process.HasExited){$process.Kill();$process.WaitForExit()};$process.Dispose()}
+}
 $fixture=Join-Path ([IO.Path]::GetTempPath()) ('ICloudRustUIFixture-'+[guid]::NewGuid().ToString('N'))
 $null=[IO.Directory]::CreateDirectory((Join-Path $fixture 'tools'))
 $accessibilityProbe=Join-Path $fixture 'RustUIAccessibilityProbe.exe'
@@ -90,7 +105,7 @@ if($mode -eq 'mismatch'){exit 2};exit $code
 [IO.File]::WriteAllText((Join-Path $fixture 'tools/Invoke-WinUIBridge.ps1'),$stub)
 $evidence=Join-Path $repo '.local/rust-ui-parity';$null=[IO.Directory]::CreateDirectory($evidence)
 $previousDpi=[RustUIProbe]::SetThreadDpiAwarenessContext([IntPtr](-4))
-$inputDesktop=[ICloudTestDesktop]::InputName();$process=$null;$results=@()
+$inputDesktop=[ICloudTestDesktop]::InputName();$process=$null;$results=@();$script:copyApplyRunning=$false
 try{
  foreach($dpi in @(96,144,192)){
     Set-Content (Join-Path $fixture 'mode.txt') 'large'
@@ -210,17 +225,57 @@ try{
     $process.Dispose();$process=$null
     'PASS: Rust UI routes configuration Check through the Rust worker and renders its structured result without PowerShell'
 
-    $script:process=Start-UIWithEnvironment '--mode Setup' @{ICLOUD_SCRIPT_ROOT=$fixture;ICLOUD_NATIVE_BACKEND=$BackendWorkerPath};$script:window=[IntPtr]::Zero
-    Wait-For {$script:window=[RustUIProbe]::Find($process.Id);$window -ne [IntPtr]::Zero -and [RustUIProbe]::IsWindowVisible($window) -and (Control 110) -ne [IntPtr]::Zero} 'Native-copy UI window missing'
-    Choose 4
-    Click 1;Wait-Status '*File-copy preview*'
-    Assert ([RustUIProbe]::IsWindowVisible((Control 115))) 'Native Rust copy preview did not render its structured plan table'
-    Assert ([RustUIProbe]::IsWindowEnabled((Control 3))) 'Validated Windows-default copy preview did not enable reviewed Apply'
-    Assert (-not(Test-Path (Join-Path $fixture 'requests.jsonl'))) 'Native Rust copy preview used the PowerShell bridge'
-    [RustUIProbe]::PostMessage($window,0x0010,[IntPtr]::Zero,[IntPtr]::Zero)|Out-Null
-    Assert ($process.WaitForExit(10000) -and $process.ExitCode -eq 0) 'Native-copy UI did not close cleanly'
-    $process.Dispose();$process=$null
-    'PASS: Rust UI routes Windows-default copy Preview through the native worker and renders its structured result'
+    $copyKey=[Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders',$true)
+    Assert ($null -ne $copyKey) 'Current-user shell-folder registry key is unavailable for the isolated Rust UI copy fixture'
+    $copySourceRoot=Join-Path $fixture 'native-ui-copy-source';$null=[IO.Directory]::CreateDirectory($copySourceRoot)
+    $copyName='native-ui-copy-'+[guid]::NewGuid().ToString('N')+'.txt'
+    $copySourceFile=Join-Path $copySourceRoot $copyName
+    $copyContents='native Rust UI copy fixture remains intact'
+    [IO.File]::WriteAllText($copySourceFile,$copyContents)
+    $hadPersonal=$copyKey.GetValueNames() -contains 'Personal'
+    $personalKind=$null;$personalValue=$null
+    if($hadPersonal){$personalKind=$copyKey.GetValueKind('Personal');$personalValue=$copyKey.GetValue('Personal',$null,[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)}
+    $defaultRows=Invoke-NativeBackend $BackendWorkerPath '{"version":1,"operation":"defaults"}'
+    $documents=@($defaultRows|Where-Object {$_.type -eq 'defaults'}|ForEach-Object {$_.folders}|Where-Object folder -eq 'Documents')
+    Assert ($documents.Count -eq 1 -and $documents[0].path.StartsWith($env:USERPROFILE+'\',[StringComparison]::OrdinalIgnoreCase)) 'Windows default Documents path is unavailable or outside the disposable user profile'
+    $copyDestinationRoot=[string]$documents[0].path
+    $copyDestinationFile=Join-Path $copyDestinationRoot $copyName
+    Assert (-not(Test-Path -LiteralPath $copyDestinationFile)) 'Unique Rust UI copy fixture destination already exists'
+    $copyDestinationRootExisted=[IO.Directory]::Exists($copyDestinationRoot)
+    try{
+        $copyKey.SetValue('Personal',$copySourceRoot,[Microsoft.Win32.RegistryValueKind]::ExpandString)
+        $script:process=Start-UIWithEnvironment '--mode Setup' @{ICLOUD_SCRIPT_ROOT=$fixture;ICLOUD_NATIVE_BACKEND=$BackendWorkerPath};$script:window=[IntPtr]::Zero
+        Wait-For {$script:window=[RustUIProbe]::Find($process.Id);$window -ne [IntPtr]::Zero -and [RustUIProbe]::IsWindowVisible($window) -and (Control 110) -ne [IntPtr]::Zero} 'Native-copy UI window missing'
+        Choose 4
+        Click 1;Wait-Status '*File-copy preview*'
+        Assert ([RustUIProbe]::IsWindowVisible((Control 115))) 'Native Rust copy preview did not render its structured plan table'
+        Assert ([RustUIProbe]::IsWindowEnabled((Control 3))) 'Validated Windows-default copy preview did not enable reviewed Apply'
+        Assert (-not(Test-Path (Join-Path $fixture 'requests.jsonl'))) 'Native Rust copy preview used the PowerShell bridge'
+        Confirm $true;$script:copyApplyRunning=$true
+        Wait-Status '*Copy verified*'
+        $script:copyApplyRunning=$false
+        Assert ((Test-Path -LiteralPath $copyDestinationFile -PathType Leaf) -and [IO.File]::ReadAllText($copyDestinationFile) -ceq $copyContents) 'Rust UI Apply did not create the verified Windows-default copy'
+        Assert ([IO.File]::ReadAllText($copySourceFile) -ceq $copyContents) 'Rust UI Apply changed the source file'
+        Assert (-not(Test-Path (Join-Path $fixture 'requests.jsonl'))) 'Native Rust copy Apply used the PowerShell bridge'
+        [RustUIProbe]::PostMessage($window,0x0010,[IntPtr]::Zero,[IntPtr]::Zero)|Out-Null
+        Assert ($process.WaitForExit(10000) -and $process.ExitCode -eq 0) 'Native-copy UI did not close cleanly'
+        $process.Dispose();$process=$null
+        'PASS: Rust UI routes Windows-default copy Preview and confirmed Apply through the native worker; source retained and destination verified'
+    }finally{
+        if($script:process){
+            if(-not $script:process.HasExited -and $script:copyApplyRunning){
+                if([RustUIProbe]::IsWindowEnabled((Control 105))){Click 105}
+                Wait-For {[RustUIProbe]::IsWindowEnabled((Control 1))} 'Copy Apply did not finish at a safe boundary after the fixture requested cancellation'
+                $script:copyApplyRunning=$false
+            }
+            if(-not $script:process.HasExited){[RustUIProbe]::PostMessage([RustUIProbe]::Find($script:process.Id),0x0010,[IntPtr]::Zero,[IntPtr]::Zero)|Out-Null;if(-not $script:process.WaitForExit(10000) -and -not $script:copyApplyRunning){$script:process.Kill();$script:process.WaitForExit()}}
+            $script:process.Dispose();$script:process=$null
+        }
+        if($hadPersonal){$copyKey.SetValue('Personal',$personalValue,$personalKind)}else{$copyKey.DeleteValue('Personal',$false)}
+        $copyKey.Dispose()
+        if(Test-Path -LiteralPath $copyDestinationFile -PathType Leaf){Remove-Item -LiteralPath $copyDestinationFile -Force}
+        if(-not $copyDestinationRootExisted -and [IO.Directory]::Exists($copyDestinationRoot) -and @(Get-ChildItem -LiteralPath $copyDestinationRoot -Force).Count -eq 0){Remove-Item -LiteralPath $copyDestinationRoot -Force}
+    }
 
     $beforeBootstrap=@(Get-Process -Name icloud-folder-ui -ErrorAction SilentlyContinue|ForEach-Object Id)
     & (Join-Path $repo 'Start-ICloudRustUI.ps1') -InitialMode Setup
@@ -288,7 +343,7 @@ try{
     throw
 }finally{
  [RustUIProbe]::SetThreadDpiAwarenessContext($previousDpi)|Out-Null
- if($process){if(-not $process.HasExited){$process.Kill();$process.WaitForExit()};$process.Dispose()}
+ if($process){if(-not $process.HasExited -and -not $script:copyApplyRunning){$process.Kill();$process.WaitForExit()};$process.Dispose()}
  $resolved=[IO.Path]::GetFullPath($fixture);$temp=[IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\')+'\'
  if(-not $resolved.StartsWith($temp,[StringComparison]::OrdinalIgnoreCase) -or [IO.Path]::GetFileName($resolved) -notmatch '^ICloudRustUIFixture-[a-f0-9]{32}$'){throw 'Refusing cleanup outside fixture'}
  Remove-Item -LiteralPath $resolved -Recurse -Force
