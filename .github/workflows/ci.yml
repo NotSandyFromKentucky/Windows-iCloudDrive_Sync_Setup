@@ -80,6 +80,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Verify hosted isolation and build locked Rust snapshot
+        id: native_build
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
@@ -113,9 +114,11 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
       - name: Verify guarded Cloud Files hydration
+        if: always() && steps.native_build.outcome == 'success'
         shell: powershell
         run: ./tests/Test-NativeCloudFiles.ps1 -Snapshot $env:ICLOUD_BACKEND_SNAPSHOT
       - name: Build Rust UI and verify fixture parity and package behavior
+        if: always() && steps.native_build.outcome == 'success'
         shell: powershell
         run: |
           $backend = ./tools/Build-NativeBackend.ps1
