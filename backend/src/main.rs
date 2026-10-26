@@ -1,4 +1,4 @@
-//! Opt-in, read-only migration worker. No registry/file mutation API is exposed.
+//! Opt-in migration worker. Write operations remain gated until their preview and recovery checks pass.
 #![cfg(windows)]
 use serde::{Deserialize, Deserializer, Serialize, de};
 use std::{
@@ -12,12 +12,14 @@ use std::{
 };
 use windows_sys::Win32::{
     Foundation::{
-        CloseHandle, ERROR_FILE_NOT_FOUND, ERROR_MORE_DATA, ERROR_NO_MORE_ITEMS, ERROR_SUCCESS,
-        GetLastError, HANDLE, HLOCAL, INVALID_HANDLE_VALUE, LocalFree, SYSTEMTIME, WAIT_ABANDONED,
-        WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
+        CloseHandle, ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_MORE_DATA,
+        ERROR_NO_MORE_ITEMS, ERROR_SUCCESS, GetLastError, HANDLE, HLOCAL, INVALID_HANDLE_VALUE,
+        LocalFree, SYSTEMTIME, WAIT_ABANDONED, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
     },
     Globalization::CompareStringOrdinal,
-    Security::Authorization::ConvertSidToStringSidW,
+    Security::Authorization::{
+        ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
+    },
     Security::{
         Cryptography::{
             BCRYPT_ALG_HANDLE, BCRYPT_HASH_HANDLE, BCRYPT_HASH_LENGTH, BCRYPT_OBJECT_LENGTH,
@@ -25,20 +27,23 @@ use windows_sys::Win32::{
             BCryptDestroyHash, BCryptFinishHash, BCryptGetProperty, BCryptHashData,
             BCryptOpenAlgorithmProvider,
         },
-        GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser,
+        DACL_SECURITY_INFORMATION, GetTokenInformation, PROTECTED_DACL_SECURITY_INFORMATION,
+        SECURITY_ATTRIBUTES, SetFileSecurityW, TOKEN_QUERY, TOKEN_USER, TokenUser,
     },
     Storage::FileSystem::{
-        BY_HANDLE_FILE_INFORMATION, CreateFileW, FILE_ATTRIBUTE_DEVICE, FILE_ATTRIBUTE_DIRECTORY,
-        FILE_ATTRIBUTE_TAG_INFO, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-        FILE_GENERIC_READ, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
-        FILE_SHARE_WRITE, FILE_TYPE_DISK, FileAttributeTagInfo, GetFileInformationByHandle,
-        GetFileInformationByHandleEx, GetFileType, GetFullPathNameW, OPEN_EXISTING, ReadFile,
+        BY_HANDLE_FILE_INFORMATION, CreateDirectoryW, CreateFileW, FILE_ATTRIBUTE_DEVICE,
+        FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_TAG_INFO, FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
+        FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TYPE_DISK, FileAttributeTagInfo,
+        GetFileInformationByHandle, GetFileInformationByHandleEx, GetFileType, GetFullPathNameW,
+        OPEN_EXISTING, ReadFile,
     },
     System::{
         Environment::ExpandEnvironmentStringsW,
         Registry::{
             HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_ENUMERATE_SUB_KEYS, KEY_QUERY_VALUE,
-            RegCloseKey, RegEnumKeyExW, RegOpenKeyExW, RegQueryValueExW,
+            KEY_SET_VALUE, REG_EXPAND_SZ, REG_SZ, RegCloseKey, RegDeleteValueW, RegEnumKeyExW,
+            RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
         },
         SystemInformation::GetSystemTime,
         Threading::{
@@ -51,9 +56,7 @@ const REQUEST_LIMIT: u64 = 65536;
 const ENTRY_LIMIT: usize = 10000;
 const DEPTH_LIMIT: usize = 64;
 const REPARSE_OR_ENCRYPTED: u32 = 0x400 | 0x4000;
-#[cfg(test)]
 const BACKUP_BYTE_LIMIT: usize = 4 * 1024 * 1024;
-#[cfg(test)]
 const UTF8_BOM: &[u8] = b"\xEF\xBB\xBF";
 const SHELL_KEY: &str =
     "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\User Shell Folders";
@@ -170,10 +173,33 @@ enum Request {
         #[serde(default)]
         folder_paths: BTreeMap<String, PathBuf>,
     },
+    SetupApply {
+        version: u32,
+        root: PathBuf,
+        #[serde(default)]
+        include_music: bool,
+        #[serde(default)]
+        allow_existing_content: bool,
+        #[serde(default)]
+        verified_sync_root: bool,
+        #[serde(default)]
+        folder_paths: BTreeMap<String, PathBuf>,
+        #[serde(default)]
+        confirmed: bool,
+        preview_token: String,
+    },
     ResetPreview {
         version: u32,
         #[serde(default)]
         allow_existing_content: bool,
+    },
+    ResetApply {
+        version: u32,
+        #[serde(default)]
+        allow_existing_content: bool,
+        #[serde(default)]
+        confirmed: bool,
+        preview_token: String,
     },
     ValidateBackup {
         version: u32,
@@ -191,6 +217,13 @@ enum Request {
     RestorePreviewFile {
         version: u32,
         path: PathBuf,
+    },
+    RestoreApply {
+        version: u32,
+        path: PathBuf,
+        #[serde(default)]
+        confirmed: bool,
+        preview_token: String,
     },
 }
 
@@ -960,7 +993,8 @@ where
 }
 
 fn is_missing_captures_folder(error: &str) -> bool {
-    error == "Cannot resolve the Windows current folder for Captures: SHGetKnownFolderPath failed (HRESULT 0x80070002)."
+    error
+        == "Cannot resolve the Windows current folder for Captures: SHGetKnownFolderPath failed (HRESULT 0x80070002)."
 }
 
 fn folder_paths(map: &[Mapping], flags: u32, purpose: &str) -> Result<Vec<FolderPath>> {
@@ -1436,10 +1470,6 @@ fn evaluate_restore_preview(
     })
 }
 
-// This persistence primitive is deliberately not reachable through the worker protocol yet.
-// Its only current caller is the isolated unit test; production integration waits for the
-// remaining backup-path, rollback and guarded-write parity gates.
-#[cfg(test)]
 fn persist_backup_new(
     path: &Path,
     backup: &BackupRecord,
@@ -1494,6 +1524,185 @@ fn persist_backup_new(
         Ok(())
     })();
     result
+}
+
+fn same_live_value(left: &StoredFolderValue, right: &StoredFolderValue) -> bool {
+    left.exists == right.exists && left.kind == right.kind && left.data == right.data
+}
+
+trait FolderRegistry {
+    fn read(&mut self, name: &str) -> Result<Option<StoredFolderValue>>;
+    fn write(&mut self, name: &str, kind: &'static str, data: &str) -> Result<()>;
+    fn remove(&mut self, name: &str) -> Result<()>;
+}
+
+struct CurrentUserFolderRegistry;
+
+impl FolderRegistry for CurrentUserFolderRegistry {
+    fn read(&mut self, name: &str) -> Result<Option<StoredFolderValue>> {
+        Ok(read_named_folder_values([name])?.remove(name))
+    }
+
+    fn write(&mut self, name: &str, kind: &'static str, data: &str) -> Result<()> {
+        write_named_folder_value(
+            name,
+            &StoredFolderValue {
+                exists: true,
+                kind: Some(kind),
+                data: Some(data.to_owned()),
+            },
+        )
+    }
+
+    fn remove(&mut self, name: &str) -> Result<()> {
+        write_named_folder_value(
+            name,
+            &StoredFolderValue {
+                exists: false,
+                kind: None,
+                data: None,
+            },
+        )
+    }
+}
+
+fn write_named_folder_value(name: &str, value: &StoredFolderValue) -> Result<()> {
+    let key = open_key(HKEY_CURRENT_USER, SHELL_KEY, KEY_SET_VALUE)?
+        .ok_or("The current-user folder settings key is unavailable.")?;
+    let name_wide = wide(name);
+    let status = if value.exists {
+        let data = value
+            .data
+            .as_deref()
+            .ok_or("A present registry value has no data.")?;
+        let kind = match value.kind {
+            Some("String") => REG_SZ,
+            Some("ExpandString") => REG_EXPAND_SZ,
+            _ => return Err("A registry value has an unsupported type.".into()),
+        };
+        let mut bytes = Vec::with_capacity((data.encode_utf16().count() + 1) * 2);
+        for unit in data.encode_utf16().chain(Some(0)) {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+        // SAFETY: key and name are live, the UTF-16 payload is terminated, and its byte count
+        // is checked before it is passed to the registry API.
+        unsafe {
+            RegSetValueExW(
+                key.0,
+                name_wide.as_ptr(),
+                0,
+                kind,
+                bytes.as_ptr(),
+                u32::try_from(bytes.len()).map_err(|_| "Registry value is too large.")?,
+            )
+        }
+    } else {
+        // SAFETY: key is open for value writes and name is NUL-terminated.
+        unsafe { RegDeleteValueW(key.0, name_wide.as_ptr()) }
+    };
+    if status == ERROR_SUCCESS || (!value.exists && status == ERROR_FILE_NOT_FOUND) {
+        Ok(())
+    } else {
+        Err(format!(
+            "Cannot {} registry value {name} (Windows error {status}).",
+            if value.exists { "write" } else { "remove" }
+        ))
+    }
+}
+
+fn apply_checked_transaction(
+    registry: &mut impl FolderRegistry,
+    before: &BTreeMap<String, StoredFolderValue>,
+    desired: &[BackupValue],
+) -> Result<()> {
+    let mut touched = Vec::new();
+    for value in desired {
+        let original = before
+            .get(&value.name)
+            .ok_or("Original snapshot omitted a managed registry value.")?;
+        touched.push((value.name.as_str(), original));
+        let operation = (|| {
+            if value.exists {
+                let kind = value
+                    .kind
+                    .as_deref()
+                    .filter(|kind| kind.eq_ignore_ascii_case("String"))
+                    .map_or("ExpandString", |_| "String");
+                registry.write(
+                    &value.name,
+                    kind,
+                    value
+                        .data
+                        .as_deref()
+                        .ok_or("Missing desired registry data.")?,
+                )?;
+            } else {
+                registry.remove(&value.name)?;
+            }
+            let actual = registry
+                .read(&value.name)?
+                .ok_or("Registry read-back omitted a changed value.")?;
+            let expected = StoredFolderValue {
+                exists: value.exists,
+                kind: value.kind.as_deref().map(|kind| {
+                    if kind.eq_ignore_ascii_case("String") {
+                        "String"
+                    } else {
+                        "ExpandString"
+                    }
+                }),
+                data: value.data.clone(),
+            };
+            if !same_live_value(&actual, &expected) {
+                return Err(format!("Registry verification failed for {}.", value.name));
+            }
+            Ok(())
+        })();
+        if let Err(cause) = operation {
+            let mut rollback_errors = Vec::new();
+            for (name, original) in touched.iter().rev() {
+                let restore = if original.exists {
+                    registry.write(
+                        name,
+                        original.kind.ok_or("Original registry type is missing.")?,
+                        original
+                            .data
+                            .as_deref()
+                            .ok_or("Original registry data is missing.")?,
+                    )
+                } else {
+                    registry.remove(name)
+                };
+                if let Err(error) = restore {
+                    rollback_errors.push(error);
+                    continue;
+                }
+                match registry.read(name) {
+                    Ok(Some(actual)) if same_live_value(&actual, original) => {}
+                    Ok(_) => {
+                        rollback_errors.push(format!("Rollback verification failed for {name}."))
+                    }
+                    Err(error) => rollback_errors.push(error),
+                }
+            }
+            return if rollback_errors.is_empty() {
+                Err(format!("{cause} Rollback verified."))
+            } else {
+                Err(format!(
+                    "{cause} ROLLBACK INCOMPLETE: {}",
+                    rollback_errors.join("; ")
+                ))
+            };
+        }
+    }
+    Ok(())
+}
+
+fn apply_registry_transaction(
+    before: &BTreeMap<String, StoredFolderValue>,
+    desired: &[BackupValue],
+) -> Result<()> {
+    apply_checked_transaction(&mut CurrentUserFolderRegistry, before, desired)
 }
 
 fn derive_copy_pairs(
@@ -1626,6 +1835,413 @@ fn recovery_root() -> Result<PathBuf> {
     let local = std::env::var_os("LOCALAPPDATA")
         .ok_or("The current user's local application-data folder is unavailable.")?;
     normalize_local_path(&PathBuf::from(local).join("ICloudFolderSettler\\Recovery"))
+}
+
+fn ensure_private_recovery_directory(path: &Path, sid: &str) -> Result<()> {
+    if let Some(metadata) = guarded_metadata(path)? {
+        if !metadata.is_dir() {
+            return Err("The recovery path is not a directory.".into());
+        }
+    }
+    let path_text = text(path)?;
+    let path_wide = wide(&path_text);
+    let descriptor_text = wide(&format!("D:P(A;OICI;FA;;;{sid})(A;OICI;FA;;;SY)"));
+    let mut descriptor = std::ptr::null_mut();
+    // SAFETY: the SDDL string is built from the current Windows SID and valid fixed ACEs; the
+    // API allocates a self-relative descriptor that is released below with LocalFree.
+    if unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            descriptor_text.as_ptr(),
+            1,
+            &mut descriptor,
+            std::ptr::null_mut(),
+        )
+    } == 0
+    {
+        return Err(format!(
+            "Cannot prepare private recovery permissions (Windows error {}).",
+            unsafe { GetLastError() }
+        ));
+    }
+    let descriptor = LocalAllocation(descriptor.cast());
+    let mut attributes = SECURITY_ATTRIBUTES::default();
+    attributes.nLength = std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32;
+    attributes.lpSecurityDescriptor = descriptor.0.cast();
+    // SAFETY: path and security descriptor remain live for this call. The protected DACL grants
+    // full control to this account and LocalSystem, and propagates only to children.
+    let created = unsafe { CreateDirectoryW(path_wide.as_ptr(), &attributes) };
+    if created == 0 {
+        let error = unsafe { GetLastError() };
+        if error != ERROR_ALREADY_EXISTS {
+            return Err(format!(
+                "Cannot create private recovery directory (Windows error {error})."
+            ));
+        }
+    }
+    // Apply the same protected ACL when the directory already exists, then verify it is a real
+    // directory without a reparse point before trusting it for backups.
+    // SAFETY: descriptor and path remain valid for this call.
+    if unsafe {
+        SetFileSecurityW(
+            path_wide.as_ptr(),
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            descriptor.0.cast(),
+        )
+    } == 0
+    {
+        return Err(format!(
+            "Cannot secure the recovery directory (Windows error {}).",
+            unsafe { GetLastError() }
+        ));
+    }
+    let metadata =
+        guarded_metadata(path)?.ok_or("The recovery directory disappeared after creation.")?;
+    if !metadata.is_dir() {
+        return Err("The recovery path is not a directory.".into());
+    }
+    Ok(())
+}
+
+fn create_recovery_run_directory(root: &Path, sid: &str) -> Result<PathBuf> {
+    let parent = root
+        .parent()
+        .ok_or("Recovery directory has no application-data parent.")?;
+    ensure_private_recovery_directory(parent, sid)?;
+    ensure_private_recovery_directory(root, sid)?;
+    for attempt in 0..16u32 {
+        let tick = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| "System clock is before the Unix epoch.")?
+            .as_nanos();
+        let path = root.join(format!("{:x}-{:x}-{attempt}", std::process::id(), tick));
+        let path_wide = wide(&text(&path)?);
+        // SAFETY: the recovery directory is secured and the candidate path is NUL-terminated;
+        // CreateDirectoryW atomically refuses to reuse an existing run directory.
+        if unsafe { CreateDirectoryW(path_wide.as_ptr(), std::ptr::null()) } != 0 {
+            ensure_private_recovery_directory(&path, sid)?;
+            return Ok(path);
+        }
+        let error = unsafe { GetLastError() };
+        if error != ERROR_ALREADY_EXISTS {
+            return Err(format!(
+                "Cannot create a unique recovery run directory (Windows error {error})."
+            ));
+        }
+    }
+    Err("Could not allocate a unique recovery run directory.".into())
+}
+
+fn backup_from_preview(
+    preview: &FolderPreview,
+    map: &[Mapping],
+    sid: &str,
+) -> Result<BackupRecord> {
+    if preview.rows.is_empty() {
+        return Err("The reviewed plan contains no managed folder values.".into());
+    }
+    let mut values = Vec::with_capacity(preview.rows.len());
+    let mut seen = BTreeSet::new();
+    for row in &preview.rows {
+        if !map.iter().any(|item| item.value_name == row.value_name)
+            || !seen.insert(row.value_name.to_ascii_lowercase())
+        {
+            return Err(
+                "The reviewed plan contains an unsupported or duplicate registry value.".into(),
+            );
+        }
+        values.push(BackupValue {
+            name: row.value_name.clone(),
+            exists: row.current_exists,
+            kind: row.current_kind.map(str::to_owned),
+            data: row.current.clone(),
+        });
+    }
+    let mut timestamp = SYSTEMTIME::default();
+    // SAFETY: GetSystemTime writes a complete SYSTEMTIME to this live local value.
+    unsafe { GetSystemTime(&mut timestamp) };
+    Ok(BackupRecord {
+        version: 1,
+        sid: sid.to_owned(),
+        key: SHELL_KEY.to_owned(),
+        _created_utc: Some(format!(
+            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}0000Z",
+            timestamp.wYear,
+            timestamp.wMonth,
+            timestamp.wDay,
+            timestamp.wHour,
+            timestamp.wMinute,
+            timestamp.wSecond,
+            timestamp.wMilliseconds
+        )),
+        values,
+    })
+}
+
+fn snapshot_from_backup(backup: &BackupRecord) -> BTreeMap<String, StoredFolderValue> {
+    backup
+        .values
+        .iter()
+        .map(|value| {
+            (
+                value.name.clone(),
+                StoredFolderValue {
+                    exists: value.exists,
+                    kind: value.kind.as_deref().map(|kind| {
+                        if kind.eq_ignore_ascii_case("String") {
+                            "String"
+                        } else {
+                            "ExpandString"
+                        }
+                    }),
+                    data: value.data.clone(),
+                },
+            )
+        })
+        .collect()
+}
+
+fn desired_from_preview(preview: &FolderPreview) -> Vec<BackupValue> {
+    preview
+        .rows
+        .iter()
+        .map(|row| BackupValue {
+            name: row.value_name.clone(),
+            exists: true,
+            kind: Some(row.proposed_kind.to_owned()),
+            data: Some(row.proposed.clone()),
+        })
+        .collect()
+}
+
+fn ensure_destination_access(paths: impl IntoIterator<Item = PathBuf>) -> Result<()> {
+    let mut seen = BTreeSet::new();
+    for path in paths {
+        let identity = OrdinalPath::new(&path)?;
+        if !seen.insert(identity) {
+            continue;
+        }
+        validate_path(&path)?;
+        guarded_metadata(&path)?;
+        fs::create_dir_all(&path).map_err(|error| {
+            format!(
+                "Cannot create destination directory {}: {error}",
+                path.display()
+            )
+        })?;
+        let metadata = guarded_metadata(&path)?
+            .ok_or("A destination directory disappeared after creation.")?;
+        if !metadata.is_dir() {
+            return Err(format!(
+                "Destination path is not a directory: {}",
+                path.display()
+            ));
+        }
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| "System clock is before the Unix epoch.")?
+            .as_nanos();
+        let probe = path.join(format!(
+            ".icloud-folder-probe-{}-{unique}",
+            std::process::id()
+        ));
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .share_mode(0)
+            .open(&probe)
+            .map_err(|error| {
+                format!(
+                    "Cannot test destination write access at {}: {error}",
+                    path.display()
+                )
+            })?;
+        let write_result = file
+            .write_all(b"iCloud folder destination probe")
+            .and_then(|()| file.sync_all());
+        drop(file);
+        if let Err(error) = write_result {
+            return Err(format!("Cannot write destination access probe: {error}"));
+        }
+        fs::remove_file(&probe).map_err(|error| {
+            format!("Cannot remove the uniquely created destination probe: {error}")
+        })?;
+    }
+    Ok(())
+}
+
+fn write_operation_log(path: &Path, line: &str, create: bool) -> Result<()> {
+    let mut options = OpenOptions::new();
+    options
+        .write(true)
+        .append(!create)
+        .create_new(create)
+        .share_mode(0);
+    let mut file = options
+        .open(path)
+        .map_err(|error| format!("Cannot update operation log: {error}"))?;
+    file.write_all(line.as_bytes())
+        .and_then(|()| file.write_all(b"\r\n"))
+        .and_then(|()| file.sync_all())
+        .map_err(|error| format!("Cannot flush operation log: {error}"))
+}
+
+fn apply_reviewed_preview(map: &[Mapping], preview: &FolderPreview, sid: &str) -> Result<PathBuf> {
+    if !preview.review_gates_passed || !preview.content_warnings.is_empty() {
+        return Err("Preview review gates did not pass. No folder settings were changed.".into());
+    }
+    let backup = backup_from_preview(preview, map, sid)?;
+    validate_backup(&backup, map, sid)?;
+    let before = snapshot_from_backup(&backup);
+    let desired = desired_from_preview(preview);
+    if desired.len() != before.len() {
+        return Err("Reviewed plan and backup snapshot do not have matching values.".into());
+    }
+
+    let recovery = recovery_root()?;
+    let run_directory = create_recovery_run_directory(&recovery, sid)?;
+    let backup_path = run_directory.join("before.json");
+    if let Err(error) = persist_backup_new(&backup_path, &backup, map, sid) {
+        return Err(format!(
+            "{error} Recovery backup path: {}",
+            backup_path.display()
+        ));
+    }
+    let log_path = run_directory.join("operation.log");
+    write_operation_log(&log_path, "Started settings transaction.", true)
+        .map_err(|error| format!("{error} Recovery backup: {}", backup_path.display()))?;
+
+    let destinations = preview.rows.iter().map(|row| PathBuf::from(&row.proposed));
+    if let Err(error) = ensure_destination_access(destinations) {
+        let _ = write_operation_log(&log_path, &error, false);
+        return Err(format!(
+            "{error} No registry values were changed. Recovery backup: {}",
+            backup_path.display()
+        ));
+    }
+
+    let current = read_named_folder_values(before.keys().map(String::as_str)).map_err(|error| {
+        format!(
+            "{error} No registry values were changed. Recovery backup: {}",
+            backup_path.display()
+        )
+    })?;
+    if current.len() != before.len()
+        || before.iter().any(|(name, original)| {
+            current
+                .get(name)
+                .is_none_or(|actual| !same_live_value(actual, original))
+        })
+    {
+        let message = "Settings changed after the recovery backup was written. Preview again; no settings were changed.";
+        let _ = write_operation_log(&log_path, message, false);
+        return Err(format!(
+            "{message} Recovery backup: {}",
+            backup_path.display()
+        ));
+    }
+
+    if let Err(error) = apply_registry_transaction(&before, &desired) {
+        let _ = write_operation_log(&log_path, &error, false);
+        return Err(format!(
+            "{error} Recovery backup: {}",
+            backup_path.display()
+        ));
+    }
+    write_operation_log(&log_path, "All registry values were verified.", false).map_err(
+        |error| {
+            format!(
+                "Settings were applied and verified, but {error} Recovery backup: {}",
+                backup_path.display()
+            )
+        },
+    )?;
+    Ok(backup_path)
+}
+
+fn apply_reviewed_restore(map: &[Mapping], preview: &RestorePreview, sid: &str) -> Result<PathBuf> {
+    if preview.rows.is_empty() {
+        return Err("The recovery preview contains no values to restore.".into());
+    }
+    let before_backup = BackupRecord {
+        version: 1,
+        sid: sid.to_owned(),
+        key: SHELL_KEY.to_owned(),
+        _created_utc: None,
+        values: preview
+            .rows
+            .iter()
+            .map(|row| BackupValue {
+                name: row.value_name.clone(),
+                exists: row.current_exists,
+                kind: row.current_kind.map(str::to_owned),
+                data: row.current.clone(),
+            })
+            .collect(),
+    };
+    validate_backup(&before_backup, map, sid)?;
+    let before = snapshot_from_backup(&before_backup);
+    let desired = preview
+        .rows
+        .iter()
+        .map(|row| BackupValue {
+            name: row.value_name.clone(),
+            exists: row.proposed_exists,
+            kind: row.proposed_kind.clone(),
+            data: row.proposed.clone(),
+        })
+        .collect::<Vec<_>>();
+    let recovery = recovery_root()?;
+    let run_directory = create_recovery_run_directory(&recovery, sid)?;
+    let backup_path = run_directory.join("before.json");
+    if let Err(error) = persist_backup_new(&backup_path, &before_backup, map, sid) {
+        return Err(format!(
+            "{error} Recovery backup path: {}",
+            backup_path.display()
+        ));
+    }
+    let log_path = run_directory.join("operation.log");
+    write_operation_log(&log_path, "Started recovery restore transaction.", true)
+        .map_err(|error| format!("{error} Recovery backup: {}", backup_path.display()))?;
+
+    let current = read_named_folder_values(before.keys().map(String::as_str)).map_err(|error| {
+        format!(
+            "{error} No registry values were changed. Recovery backup: {}",
+            backup_path.display()
+        )
+    })?;
+    if current.len() != before.len()
+        || before.iter().any(|(name, original)| {
+            current
+                .get(name)
+                .is_none_or(|actual| !same_live_value(actual, original))
+        })
+    {
+        let message = "Settings changed after the recovery backup was written. Preview again; no settings were changed.";
+        let _ = write_operation_log(&log_path, message, false);
+        return Err(format!(
+            "{message} Recovery backup: {}",
+            backup_path.display()
+        ));
+    }
+    if let Err(error) = apply_registry_transaction(&before, &desired) {
+        let _ = write_operation_log(&log_path, &error, false);
+        return Err(format!(
+            "{error} Recovery backup: {}",
+            backup_path.display()
+        ));
+    }
+    write_operation_log(
+        &log_path,
+        "All restored registry values were verified.",
+        false,
+    )
+    .map_err(|error| {
+        format!(
+            "Settings were applied and verified, but {error} Recovery backup: {}",
+            backup_path.display()
+        )
+    })?;
+    Ok(backup_path)
 }
 
 fn ensure_directory_path(path: &Path) -> Result<()> {
@@ -2139,6 +2755,12 @@ impl Drop for CngSha256Provider {
     }
 }
 
+fn approval_token<T: Serialize>(value: &T) -> Result<String> {
+    let bytes = serde_json::to_vec(value).map_err(|error| error.to_string())?;
+    let mut buffer = vec![0u8; 64 * 1024];
+    CngSha256Provider::new()?.digest_reader(&mut io::Cursor::new(bytes), &mut buffer)
+}
+
 struct CngHashObject {
     handle: BCRYPT_HASH_HANDLE,
     _object: Vec<u8>,
@@ -2629,7 +3251,7 @@ fn emit_copy_plan(pairs: &[CopyPair], output: &mut impl Write) -> Result<usize> 
     Ok(count)
 }
 
-fn run(input: impl Read, output: &mut impl Write) -> Result<()> {
+fn run(input: impl Read, output: &mut impl Write) -> Result<bool> {
     let mut bytes = Vec::new();
     input
         .take(REQUEST_LIMIT + 1)
@@ -2640,6 +3262,10 @@ fn run(input: impl Read, output: &mut impl Write) -> Result<()> {
     }
     let request: Request =
         serde_json::from_slice(&bytes).map_err(|e| format!("Invalid request: {e}"))?;
+    let mut read_only = !matches!(
+        &request,
+        Request::SetupApply { .. } | Request::ResetApply { .. } | Request::RestoreApply { .. }
+    );
     let version = match &request {
         Request::Metadata { version }
         | Request::Inspect { version }
@@ -2651,11 +3277,14 @@ fn run(input: impl Read, output: &mut impl Write) -> Result<()> {
         | Request::CopyPlan { version, .. }
         | Request::CopyPairs { version, .. }
         | Request::SetupPreview { version, .. }
+        | Request::SetupApply { version, .. }
         | Request::ResetPreview { version, .. }
+        | Request::ResetApply { version, .. }
         | Request::ValidateBackup { version, .. }
         | Request::BackupSnapshot { version, .. }
         | Request::RestorePreview { version, .. }
-        | Request::RestorePreviewFile { version, .. } => *version,
+        | Request::RestorePreviewFile { version, .. }
+        | Request::RestoreApply { version, .. } => *version,
     };
     if version != 1 {
         return Err("Unsupported protocol version. Expected version 1.".into());
@@ -2742,20 +3371,137 @@ fn run(input: impl Read, output: &mut impl Write) -> Result<()> {
             ..
         } => {
             let _settings_mutex = acquire_settings_mutex()?;
+            let preview = preview(
+                &map,
+                false,
+                Some(&root),
+                include_music,
+                allow_existing_content,
+                verified_sync_root,
+                &folder_paths,
+            )?;
+            let token = approval_token(&preview)?;
             emit(
                 output,
-                &serde_json::json!({"version":1,"type":"folder_preview","preview":preview(&map, false, Some(&root), include_music, allow_existing_content, verified_sync_root, &folder_paths)?}),
+                &serde_json::json!({"version":1,"type":"folder_preview","preview":preview,"approval_token":token}),
             )?;
+        }
+        Request::SetupApply {
+            root,
+            include_music,
+            allow_existing_content,
+            verified_sync_root,
+            folder_paths,
+            confirmed,
+            preview_token: expected_token,
+            ..
+        } => {
+            read_only = false;
+            let result = (|| {
+                if !confirmed {
+                    return Err(
+                        "Explicit confirmation is required before applying folder settings.".into(),
+                    );
+                }
+                let _settings_mutex = acquire_settings_mutex()?;
+                let fresh = preview(
+                    &map,
+                    false,
+                    Some(&root),
+                    include_music,
+                    allow_existing_content,
+                    verified_sync_root,
+                    &folder_paths,
+                )?;
+                if approval_token(&fresh)? != expected_token {
+                    return Err(
+                        "Folder settings changed after review. Preview again before applying."
+                            .into(),
+                    );
+                }
+                let sid = user_sid()?;
+                apply_reviewed_preview(&map, &fresh, &sid)
+            })();
+            match result {
+                Ok(backup_path) => emit(
+                    output,
+                    &serde_json::json!({"version":1,"type":"settings_apply","operation":"setup","recovery_backup":backup_path}),
+                )?,
+                Err(error) => {
+                    emit(
+                        output,
+                        &serde_json::json!({"version":1,"type":"result","ok":false,"read_only":false,"message":error}),
+                    )?;
+                    return Ok(false);
+                }
+            }
         }
         Request::ResetPreview {
             allow_existing_content,
             ..
         } => {
             let _settings_mutex = acquire_settings_mutex()?;
+            let preview = preview(
+                &map,
+                true,
+                None,
+                false,
+                allow_existing_content,
+                false,
+                &BTreeMap::new(),
+            )?;
+            let token = approval_token(&preview)?;
             emit(
                 output,
-                &serde_json::json!({"version":1,"type":"folder_preview","preview":preview(&map, true, None, false, allow_existing_content, false, &BTreeMap::new())?}),
+                &serde_json::json!({"version":1,"type":"folder_preview","preview":preview,"approval_token":token}),
             )?;
+        }
+        Request::ResetApply {
+            allow_existing_content,
+            confirmed,
+            preview_token: expected_token,
+            ..
+        } => {
+            read_only = false;
+            let result = (|| {
+                if !confirmed {
+                    return Err(
+                        "Explicit confirmation is required before resetting folder settings."
+                            .into(),
+                    );
+                }
+                let _settings_mutex = acquire_settings_mutex()?;
+                let fresh = preview(
+                    &map,
+                    true,
+                    None,
+                    false,
+                    allow_existing_content,
+                    false,
+                    &BTreeMap::new(),
+                )?;
+                if approval_token(&fresh)? != expected_token {
+                    return Err(
+                        "Folder settings changed after review. Preview again before resetting."
+                            .into(),
+                    );
+                }
+                let sid = user_sid()?;
+                apply_reviewed_preview(&map, &fresh, &sid)
+            })();
+            match result {
+                Ok(backup_path) => emit(
+                    output,
+                    &serde_json::json!({"version":1,"type":"settings_apply","operation":"reset","recovery_backup":backup_path}),
+                )?,
+                Err(error) => {
+                    emit(
+                        output,
+                        &serde_json::json!({"version":1,"type":"result","ok":false,"read_only":false,"message":error}),
+                    )?;
+                    return Ok(false);
+                }
+            }
         }
         Request::RestorePreview { backup, .. } => {
             let _settings_mutex = acquire_settings_mutex()?;
@@ -2765,9 +3511,10 @@ fn run(input: impl Read, output: &mut impl Write) -> Result<()> {
                 read_named_folder_values(backup.values.iter().map(|value| value.name.as_str()))?;
             let preview =
                 evaluate_restore_preview(&backup, &map, &sid, &current, &recovery_root()?)?;
+            let token = approval_token(&preview)?;
             emit(
                 output,
-                &serde_json::json!({"version":1,"type":"restore_preview","preview":preview}),
+                &serde_json::json!({"version":1,"type":"restore_preview","preview":preview,"approval_token":token}),
             )?;
         }
         Request::RestorePreviewFile { path, .. } => {
@@ -2778,10 +3525,52 @@ fn run(input: impl Read, output: &mut impl Write) -> Result<()> {
                 read_named_folder_values(backup.values.iter().map(|value| value.name.as_str()))?;
             let preview =
                 evaluate_restore_preview(&backup, &map, &sid, &current, &recovery_root()?)?;
+            let token = approval_token(&preview)?;
             emit(
                 output,
-                &serde_json::json!({"version":1,"type":"restore_preview","preview":preview}),
+                &serde_json::json!({"version":1,"type":"restore_preview","preview":preview,"approval_token":token}),
             )?;
+        }
+        Request::RestoreApply {
+            path,
+            confirmed,
+            preview_token: expected_token,
+            ..
+        } => {
+            read_only = false;
+            let result = (|| {
+                if !confirmed {
+                    return Err(
+                        "Explicit confirmation is required before restoring folder settings."
+                            .into(),
+                    );
+                }
+                let _settings_mutex = acquire_settings_mutex()?;
+                let sid = user_sid()?;
+                let backup = read_backup_file(&path, &map, &sid)?;
+                let current = read_named_folder_values(
+                    backup.values.iter().map(|value| value.name.as_str()),
+                )?;
+                let fresh =
+                    evaluate_restore_preview(&backup, &map, &sid, &current, &recovery_root()?)?;
+                if approval_token(&fresh)? != expected_token {
+                    return Err("Folder settings or recovery data changed after review. Preview again before restoring.".into());
+                }
+                apply_reviewed_restore(&map, &fresh, &sid)
+            })();
+            match result {
+                Ok(backup_path) => emit(
+                    output,
+                    &serde_json::json!({"version":1,"type":"settings_apply","operation":"restore","recovery_backup":backup_path}),
+                )?,
+                Err(error) => {
+                    emit(
+                        output,
+                        &serde_json::json!({"version":1,"type":"result","ok":false,"read_only":false,"message":error}),
+                    )?;
+                    return Ok(false);
+                }
+            }
         }
         Request::ValidateBackup { backup, .. } => {
             let sid = user_sid()?;
@@ -2835,8 +3624,9 @@ fn run(input: impl Read, output: &mut impl Write) -> Result<()> {
     }
     emit(
         output,
-        &serde_json::json!({"version":1,"type":"result","ok":true,"read_only":true}),
-    )
+        &serde_json::json!({"version":1,"type":"result","ok":true,"read_only":read_only}),
+    )?;
+    Ok(true)
 }
 
 fn main() {
@@ -2846,13 +3636,20 @@ fn main() {
     } else {
         run(io::stdin().lock(), &mut output)
     };
-    if let Err(error) = result {
-        let _ = emit(
-            &mut output,
-            &serde_json::json!({"version":1,"type":"result","ok":false,"read_only":true,"message":error}),
-        );
-        let _ = output.flush();
-        std::process::exit(1);
+    match result {
+        Err(error) => {
+            let _ = emit(
+                &mut output,
+                &serde_json::json!({"version":1,"type":"result","ok":false,"read_only":true,"message":error}),
+            );
+            let _ = output.flush();
+            std::process::exit(1);
+        }
+        Ok(false) => {
+            let _ = output.flush();
+            std::process::exit(1);
+        }
+        Ok(true) => {}
     }
     if output.flush().is_err() {
         std::process::exit(1);
@@ -2957,10 +3754,7 @@ mod tests {
             )],
             normalize_registered_root,
         );
-        assert!(
-            relative.is_err(),
-            "a relative registered root was accepted"
-        );
+        assert!(relative.is_err(), "a relative registered root was accepted");
 
         let malformed = collect_registered_icloud_roots(
             [("iCloudDrive!Malformed".into(), Some("C:\\NUL".into()))],
@@ -3155,12 +3949,6 @@ mod tests {
         );
     }
 
-    trait RegistryFixture {
-        fn read(&self, name: &str) -> Result<Option<StoredFolderValue>>;
-        fn write(&mut self, name: &str, kind: &'static str, data: &str) -> Result<()>;
-        fn remove(&mut self, name: &str) -> Result<()>;
-    }
-
     fn same_stored_value(
         left: Option<&StoredFolderValue>,
         right: Option<&StoredFolderValue>,
@@ -3174,103 +3962,29 @@ mod tests {
         }
     }
 
-    // Test-only transaction model: runtime registry writes remain unavailable.
+    // The same checked transaction algorithm is exercised with a fake registry in unit tests.
     fn apply_fixture_transaction(
-        registry: &mut impl RegistryFixture,
+        registry: &mut impl FolderRegistry,
         before: &BTreeMap<String, StoredFolderValue>,
         desired: &[BackupValue],
     ) -> Result<()> {
-        let mut touched: Vec<&str> = Vec::new();
-        for value in desired {
-            let outcome = (|| {
-                let intended = if value.exists {
-                    registry.write(
-                        &value.name,
-                        if value
-                            .kind
-                            .as_deref()
-                            .is_some_and(|kind| kind.eq_ignore_ascii_case("String"))
-                        {
-                            "String"
-                        } else {
-                            "ExpandString"
-                        },
-                        value.data.as_deref().ok_or("Missing desired data.")?,
-                    )?;
-                    registry.read(&value.name)?
-                } else {
-                    registry.remove(&value.name)?;
-                    registry.read(&value.name)?
-                };
-                let expected = value.exists.then(|| StoredFolderValue {
-                    exists: true,
-                    kind: Some(
-                        if value
-                            .kind
-                            .as_deref()
-                            .is_some_and(|kind| kind.eq_ignore_ascii_case("String"))
-                        {
-                            "String"
-                        } else {
-                            "ExpandString"
-                        },
-                    ),
-                    data: value.data.clone(),
-                });
-                if !same_stored_value(intended.as_ref(), expected.as_ref()) {
-                    return Err(format!("Registry verification failed for {}.", value.name));
-                }
-                Ok(())
-            })();
-            touched.push(&value.name);
-            if let Err(cause) = outcome {
-                let mut rollback_errors = Vec::new();
-                for name in touched.iter().rev() {
-                    let original = before
-                        .get(*name)
-                        .ok_or("Original snapshot omitted a value.")?;
-                    let restore = if original.exists {
-                        registry.write(
-                            name,
-                            original.kind.ok_or("Original registry type is missing.")?,
-                            original
-                                .data
-                                .as_deref()
-                                .ok_or("Original registry data is missing.")?,
-                        )
-                    } else {
-                        registry.remove(name)
-                    };
-                    if let Err(error) = restore {
-                        rollback_errors.push(error);
-                        continue;
-                    }
-                    if !same_stored_value(registry.read(name)?.as_ref(), Some(original)) {
-                        rollback_errors.push(format!("Rollback verification failed for {name}."));
-                    }
-                }
-                return if rollback_errors.is_empty() {
-                    Err(format!("{cause} Rollback verified."))
-                } else {
-                    Err(format!(
-                        "{cause} ROLLBACK INCOMPLETE: {}",
-                        rollback_errors.join("; ")
-                    ))
-                };
-            }
-        }
-        Ok(())
+        apply_checked_transaction(registry, before, desired)
     }
 
     #[derive(Default)]
     struct FakeRegistry {
         values: HashMap<String, StoredFolderValue>,
+        fail_read: Option<String>,
         fail_write: Option<String>,
         fail_remove: Option<String>,
     }
 
-    impl RegistryFixture for FakeRegistry {
-        fn read(&self, name: &str) -> Result<Option<StoredFolderValue>> {
+    impl FolderRegistry for FakeRegistry {
+        fn read(&mut self, name: &str) -> Result<Option<StoredFolderValue>> {
+            if self.fail_read.as_deref() == Some(name) {
+                self.fail_read = None;
+                return Err("Injected registry read-back failure.".into());
+            }
             Ok(Some(self.values.get(name).cloned().unwrap_or(
                 StoredFolderValue {
                     exists: false,
@@ -3357,6 +4071,36 @@ mod tests {
     }
 
     #[test]
+    fn checked_transaction_rolls_back_when_readback_fails() {
+        let before = BTreeMap::from([(
+            "Documents".to_owned(),
+            StoredFolderValue {
+                exists: true,
+                kind: Some("String"),
+                data: Some("C:\\Before".into()),
+            },
+        )]);
+        let desired = vec![BackupValue {
+            name: "Documents".into(),
+            exists: true,
+            kind: Some("ExpandString".into()),
+            data: Some("C:\\After".into()),
+        }];
+        let mut registry = FakeRegistry::default();
+        registry
+            .values
+            .insert("Documents".into(), before["Documents"].clone());
+        registry.fail_read = Some("Documents".into());
+
+        let error = apply_fixture_transaction(&mut registry, &before, &desired).unwrap_err();
+        assert!(error.contains("Rollback verified."), "{error}");
+        assert!(same_stored_value(
+            registry.values.get("Documents"),
+            Some(&before["Documents"])
+        ));
+    }
+
+    #[test]
     fn checked_transaction_reports_incomplete_rollback() {
         let before = BTreeMap::from([
             (
@@ -3406,6 +4150,23 @@ mod tests {
     }
 
     #[test]
+    fn approval_token_is_stable_and_covers_the_complete_preview() {
+        let mut preview = serde_json::json!({
+            "operation":"reset",
+            "review_gates_passed":true,
+            "rows":[{"folder":"Desktop","current":"D:\\Desktop","proposed":"C:\\Users\\Test\\Desktop"}]
+        });
+        let original = approval_token(&preview).expect("hash serialized preview");
+        assert_eq!(original.len(), 64);
+        assert_eq!(approval_token(&preview).unwrap(), original);
+        preview["rows"][0]["proposed"] = "C:\\Users\\Other\\Desktop".into();
+        assert_ne!(approval_token(&preview).unwrap(), original);
+        preview["rows"][0]["proposed"] = "C:\\Users\\Test\\Desktop".into();
+        preview["review_gates_passed"] = false.into();
+        assert_ne!(approval_token(&preview).unwrap(), original);
+    }
+
+    #[test]
     fn rejects_bad_protocol_and_mutation() {
         assert!(
             run(
@@ -3426,6 +4187,35 @@ mod tests {
         }
         assert!(run(vec![b' '; 65537].as_slice(), &mut Vec::new()).is_err());
     }
+
+    #[test]
+    fn all_settings_write_requests_fail_closed_without_explicit_confirmation() {
+        let requests = [
+            r#"{"version":1,"operation":"setup_apply","root":"C:\\Fixture\\Drive","preview_token":""}"#,
+            r#"{"version":1,"operation":"reset_apply","preview_token":""}"#,
+            r#"{"version":1,"operation":"restore_apply","path":"C:\\Fixture\\before.json","preview_token":""}"#,
+        ];
+        for request in requests {
+            let mut output = Vec::new();
+            assert_eq!(run(request.as_bytes(), &mut output).unwrap(), false);
+            let records: Vec<serde_json::Value> = String::from_utf8(output)
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            let terminal = records.last().unwrap();
+            assert_eq!(terminal["type"], "result");
+            assert_eq!(terminal["ok"], false);
+            assert_eq!(terminal["read_only"], false);
+            assert!(
+                terminal["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("Explicit confirmation is required")
+            );
+        }
+    }
+
     #[test]
     fn backup_validation_preserves_present_and_absent_values_and_rejects_unsafe_records() {
         let map: Vec<Mapping> = serde_json::from_str(MAP).unwrap();
@@ -3591,6 +4381,31 @@ mod tests {
         assert!(persist_backup_new(&invalid_path, &invalid, &map, sid).is_err());
         assert!(!invalid_path.exists());
         let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn private_recovery_directory_is_current_user_scoped_and_rejects_files() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let parent = std::env::temp_dir().join(format!(
+            "ICloudPrivateRecoveryTest-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir(&parent).unwrap();
+        let sid = user_sid().unwrap();
+        let recovery = parent.join("Recovery");
+        ensure_private_recovery_directory(&recovery, &sid).unwrap();
+        assert!(fs::metadata(&recovery).unwrap().is_dir());
+        ensure_private_recovery_directory(&recovery, &sid)
+            .expect("an existing recovery directory should be secured idempotently");
+
+        let file = parent.join("not-a-directory");
+        fs::write(&file, b"keeper").unwrap();
+        assert!(ensure_private_recovery_directory(&file, &sid).is_err());
+        assert_eq!(fs::read(&file).unwrap(), b"keeper");
+        fs::remove_dir_all(parent).unwrap();
     }
 
     #[test]

@@ -226,6 +226,20 @@ try{
     $process.Dispose();$process=$null
     'PASS: Start-ICloudRustUI builds/caches its worker and routes Check through it on the hidden desktop'
 
+    $script:process=Start-UIWithEnvironment '--mode Setup' @{ICLOUD_SCRIPT_ROOT=$fixture;ICLOUD_NATIVE_BACKEND=$BackendWorkerPath};$script:window=[IntPtr]::Zero
+    Wait-For {$script:window=[RustUIProbe]::Find($process.Id);$window -ne [IntPtr]::Zero -and [RustUIProbe]::IsWindowVisible($window) -and (Control 110) -ne [IntPtr]::Zero} 'Rust reset-preview UI window missing'
+    Choose 1
+    Click 113
+    Click 1;Wait-Status '*Reset preview is ready*'
+    Assert ([RustUIProbe]::IsWindowVisible((Control 115))) 'Rust reset preview did not render its structured table'
+    Assert ([RustUIProbe]::Send((Control 115),0x1004,[IntPtr]::Zero,[IntPtr]::Zero).ToInt32() -ge 6) 'Rust reset preview returned too few managed-folder rows'
+    Assert ([RustUIProbe]::IsWindowEnabled((Control 3))) 'Validated reset preview did not enable reviewed Apply'
+    Assert (-not(Test-Path (Join-Path $fixture 'requests.jsonl'))) 'Rust reset preview used the PowerShell bridge'
+    [RustUIProbe]::PostMessage($window,0x0010,[IntPtr]::Zero,[IntPtr]::Zero)|Out-Null
+    Assert ($process.WaitForExit(10000) -and $process.ExitCode -eq 0) 'Rust reset-preview UI did not close cleanly'
+    $process.Dispose();$process=$null
+    'PASS: Rust UI routes reset Preview through the native worker and binds Apply to the returned review token without applying it'
+
     $restoreRoot=Join-Path $fixture 'restore targets';$null=[IO.Directory]::CreateDirectory($restoreRoot)
     $module=Import-Module (Join-Path $repo 'ICloudFolders.psm1') -Force -PassThru
     $map=& $module { Get-FolderMap -IncludeMusic }

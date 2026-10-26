@@ -260,6 +260,26 @@ try{
     $afterSetupPreview=(Invoke-Worker '{"version":1,"operation":"backup_snapshot","include_music":true}')[0].backup.Values|ConvertTo-Json -Depth 6 -Compress
     Assert ($beforeSetupPreview -ceq $afterSetupPreview) 'Setup preview changed current-user folder registry values'
     'PASS: setup preview returns every mapped destination, preserves review gates and creates or changes nothing'
+    $setupToken=[string]$setupPreviewRecords[0].approval_token
+    Assert ($setupToken -match '^[A-Fa-f0-9]{64}$') 'Setup preview omitted its SHA-256 review token'
+    $wrongSetupToken=if($setupToken[0] -ceq '0'){'1'+$setupToken.Substring(1)}else{'0'+$setupToken.Substring(1)}
+    $staleSetupRequest=@{version=1;operation='setup_apply';root=$fixture;include_music=$true;allow_existing_content=$false;verified_sync_root=$false;folder_paths=@{};confirmed=$true;preview_token=$wrongSetupToken}|ConvertTo-Json -Compress
+    $staleSetup=Invoke-Worker $staleSetupRequest $false
+    Assert ($staleSetup[-1].message -like '*changed after review*') 'Setup Apply accepted a token that did not match its fresh preview'
+    $afterStaleSetup=(Invoke-Worker '{"version":1,"operation":"backup_snapshot","include_music":true}')[0].backup.Values|ConvertTo-Json -Depth 6 -Compress
+    Assert ($beforeSetupPreview -ceq $afterStaleSetup) 'Rejected stale setup Apply changed current-user folder registry values'
+    if(-not $defaultQueryError){
+        $resetPreviewRecords=Invoke-Worker '{"version":1,"operation":"reset_preview","allow_existing_content":true}'
+        $resetToken=[string]$resetPreviewRecords[0].approval_token
+        Assert ($resetToken -match '^[A-Fa-f0-9]{64}$') 'Reset preview omitted its SHA-256 review token'
+        $wrongResetToken=if($resetToken[0] -ceq '0'){'1'+$resetToken.Substring(1)}else{'0'+$resetToken.Substring(1)}
+        $staleResetRequest=@{version=1;operation='reset_apply';allow_existing_content=$true;confirmed=$true;preview_token=$wrongResetToken}|ConvertTo-Json -Compress
+        $staleReset=Invoke-Worker $staleResetRequest $false
+        Assert ($staleReset[-1].message -like '*changed after review*') 'Reset Apply accepted a token that did not match its fresh preview'
+        $afterStaleReset=(Invoke-Worker '{"version":1,"operation":"backup_snapshot","include_music":true}')[0].backup.Values|ConvertTo-Json -Depth 6 -Compress
+        Assert ($beforeSetupPreview -ceq $afterStaleReset) 'Rejected stale reset Apply changed current-user folder registry values'
+        'PASS: setup/reset Apply reject stale review tokens without changing mapped registry values'
+    }
     $custom=Join-Path $fixture 'CustomDocuments'
     $customRequest=@{version=1;operation='check';root=$fixture;include_music=$true;folder_paths=@{Documents=$custom}}|ConvertTo-Json -Compress
     $customCheck=(Invoke-Worker $customRequest)[0].check
@@ -454,6 +474,84 @@ try{
     $failure=Invoke-Worker $deepRequest $false
     Assert ($failure[-1].message -like '*planning limit reached*') 'Depth bound failed for an unrelated reason'
     Assert (-not(Test-Path -LiteralPath (Join-Path $fixture 'deep-target'))) 'Depth-limit refusal created a destination'
+    $applyRoot=Join-Path $fixture 'native-apply-drive'
+    $null=[IO.Directory]::CreateDirectory($applyRoot)
+    $applyProvider='iCloudDrive!CodexApply-'+[guid]::NewGuid().ToString('N')
+    $applyRegistryBase=[Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($registrationBasePath,$true)
+    Assert ($null -ne $applyRegistryBase) 'Windows SyncRootManager registry key is unavailable for the isolated write fixture'
+    $applyRegistration=$applyRegistryBase.CreateSubKey($applyProvider+'\UserSyncRoots')
+    try{$applyRegistration.SetValue($sid,$applyRoot,[Microsoft.Win32.RegistryValueKind]::String)}finally{$applyRegistration.Dispose()}
+    $writeRecoveryBackup=$null
+    $settingsRestored=$false
+    try {
+        $setupApplyRequest=@{version=1;operation='setup_preview';root=$applyRoot;include_music=$true;allow_existing_content=$true}|ConvertTo-Json -Compress
+        $setupApplyPreview=Invoke-Worker $setupApplyRequest
+        $setupApproval=[string]$setupApplyPreview[0].approval_token
+        Assert ($setupApproval -match '^[A-Fa-f0-9]{64}$' -and $setupApplyPreview[0].preview.review_gates_passed) 'Registered isolated setup preview was not ready to apply'
+        $setupWriteRequest=@{version=1;operation='setup_apply';root=$applyRoot;include_music=$true;allow_existing_content=$true;verified_sync_root=$false;folder_paths=@{};confirmed=$true;preview_token=$setupApproval}|ConvertTo-Json -Compress
+        $setupWrite=Invoke-Worker $setupWriteRequest
+        $setupWriteResult=@($setupWrite|Where-Object type -ceq 'settings_apply')
+        if($setupWriteResult.Count -eq 1){$writeRecoveryBackup=[string]$setupWriteResult[0].recovery_backup}
+        Assert ($setupWriteResult.Count -eq 1 -and $setupWriteResult[0].operation -ceq 'setup' -and $setupWriteResult[0].recovery_backup -and $setupWrite[-1].read_only -eq $false) 'Native setup Apply returned no recovery backup or incorrect write state'
+        Assert ((Test-Path -LiteralPath $writeRecoveryBackup -PathType Leaf) -and (Test-Path -LiteralPath (Join-Path (Split-Path $writeRecoveryBackup -Parent) 'operation.log') -PathType Leaf)) 'Native setup Apply did not persist its recovery evidence'
+        $writtenBackup=Get-Content -LiteralPath $writeRecoveryBackup -Raw|ConvertFrom-Json
+        $backupValidation=Invoke-Worker (([ordered]@{version=1;operation='validate_backup';backup=$writtenBackup}|ConvertTo-Json -Depth 8 -Compress))
+        Assert ($backupValidation[0].valid -and $backupValidation[0].value_count -eq $expected.Count) 'Native setup Apply backup did not validate for this account'
+        foreach($item in $expected){
+            $path=Join-Path $applyRoot $item.relative_path
+            $actualValue=& $module {param($name) Read-FolderValue $name} $item.value_name
+            Assert ($actualValue.Exists -and [string]::Equals($actualValue.Data,$path,[StringComparison]::OrdinalIgnoreCase)) ('Native setup Apply did not write the reviewed folder value '+$item.value_name)
+        }
+        'PASS: native setup Apply writes reviewed values and persists a validated account-bound recovery backup'
+
+        if(-not $defaultQueryError){
+            $resetApplyPreview=Invoke-Worker '{"version":1,"operation":"reset_preview","allow_existing_content":true}'
+            $resetApproval=[string]$resetApplyPreview[0].approval_token
+            Assert ($resetApproval -match '^[A-Fa-f0-9]{64}$' -and $resetApplyPreview[0].preview.review_gates_passed) 'Isolated reset preview was not ready to apply'
+            $resetWrite=Invoke-Worker (([ordered]@{version=1;operation='reset_apply';allow_existing_content=$true;confirmed=$true;preview_token=$resetApproval}|ConvertTo-Json -Compress))
+            $resetWriteResult=@($resetWrite|Where-Object type -ceq 'settings_apply')
+            Assert ($resetWriteResult.Count -eq 1 -and $resetWriteResult[0].operation -ceq 'reset' -and $resetWriteResult[0].recovery_backup -and $resetWrite[-1].read_only -eq $false) 'Native reset Apply returned no recovery backup or incorrect write state'
+            $resetBackup=[string]$resetWriteResult[0].recovery_backup
+            Assert ((Test-Path -LiteralPath $resetBackup -PathType Leaf) -and (Test-Path -LiteralPath (Join-Path (Split-Path $resetBackup -Parent) 'operation.log') -PathType Leaf)) 'Native reset Apply did not persist its recovery evidence'
+            foreach($item in $expected){
+                $folder=if($item.relative_path -ceq 'Videos\Captures'){'Captures'}else{$item.relative_path}
+                $default=$expectedDefaults|Where-Object folder -ceq $folder|Select-Object -First 1
+                $actualValue=& $module {param($name) Read-FolderValue $name} $item.value_name
+                Assert ($null -ne $default -and $actualValue.Exists -and [string]::Equals($actualValue.Data,$default.path,[StringComparison]::OrdinalIgnoreCase)) ('Native reset Apply did not write the Windows default for '+$item.value_name)
+            }
+            'PASS: native reset Apply writes Windows-supplied defaults after a fresh reviewed preview'
+        }
+
+        $restoreApplyPreview=Invoke-Worker (([ordered]@{version=1;operation='restore_preview_file';path=$writeRecoveryBackup}|ConvertTo-Json -Compress))
+        $restoreApproval=[string]$restoreApplyPreview[0].approval_token
+        Assert ($restoreApproval -match '^[A-Fa-f0-9]{64}$') 'Native restore preview omitted its approval token'
+        $restoreWrite=Invoke-Worker (([ordered]@{version=1;operation='restore_apply';path=$writeRecoveryBackup;confirmed=$true;preview_token=$restoreApproval}|ConvertTo-Json -Compress))
+        $restoreWriteResult=@($restoreWrite|Where-Object type -ceq 'settings_apply')
+        Assert ($restoreWriteResult.Count -eq 1 -and $restoreWriteResult[0].operation -ceq 'restore' -and $restoreWriteResult[0].recovery_backup -and $restoreWrite[-1].read_only -eq $false) 'Native restore Apply returned no recovery backup or incorrect write state'
+        foreach($originalValue in $writtenBackup.Values){
+            $actualValue=& $module {param($name) Read-FolderValue $name} $originalValue.Name
+            Assert ($actualValue.Exists -eq $originalValue.Exists -and [string]::Equals($actualValue.Kind,$originalValue.Kind,[StringComparison]::Ordinal) -and [string]::Equals($actualValue.Data,$originalValue.Data,[StringComparison]::Ordinal)) ('Native restore Apply did not restore exact original value '+$originalValue.Name)
+        }
+        $settingsRestored=$true
+        'PASS: native restore Apply restores exact original registry kinds, strings and absent values'
+    } finally {
+        $restoreFailed=$false
+        if($writeRecoveryBackup -and -not $settingsRestored -and (Test-Path -LiteralPath $writeRecoveryBackup -PathType Leaf)){
+            try {
+                $restoreRequest=@{version=1;operation='restore_preview_file';path=$writeRecoveryBackup}|ConvertTo-Json -Compress
+                $restorePreview=Invoke-Worker $restoreRequest
+                $token=[string]$restorePreview[0].approval_token
+                $applyRequest=@{version=1;operation='restore_apply';path=$writeRecoveryBackup;confirmed=$true;preview_token=$token}|ConvertTo-Json -Compress
+                $null=Invoke-Worker $applyRequest
+                $settingsRestored=$true
+            } catch {
+                try { & $module {param($path) Invoke-ICloudFolders -RestoreBackup $path} $writeRecoveryBackup *> $null; $settingsRestored=$true } catch { }
+            }
+            if(-not $settingsRestored){$restoreFailed=$true}
+        }
+        try{$applyRegistryBase.DeleteSubKeyTree($applyProvider,$false)}finally{$applyRegistryBase.Dispose()}
+        if($restoreFailed){throw 'Could not restore the isolated runner settings from the verified pre-apply backup.'}
+    }
     # This is a read-only snapshot, not a synchronization-health check. Never print personal values.
     $inspection=Invoke-Worker '{"version":1,"operation":"inspect"}'
     Assert ($inspection[0].values.Count -eq $expected.Count) 'Registry inspection lost mapped aliases'

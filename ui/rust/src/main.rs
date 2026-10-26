@@ -58,7 +58,6 @@ type AllowDarkModeForWindow = unsafe extern "system" fn(HWND, i32) -> i32;
 static ALLOW_DARK_MODE: std::sync::OnceLock<Option<AllowDarkModeForWindow>> =
     std::sync::OnceLock::new();
 
-
 const MAP: &str = include_str!(env!("ICLOUD_FOLDER_MAP_PATH"));
 const ROOT: usize = 100;
 const MUSIC: usize = 101;
@@ -229,6 +228,7 @@ struct State {
     install: HWND,
     desktop_shortcut: HWND,
     reviewed: Option<Options>,
+    review_token: Option<String>,
     running_options: Option<Options>,
     running_phase: String,
     raw: String,
@@ -426,13 +426,17 @@ fn read_system_accent_color() -> u32 {
             "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Accent",
             "AccentColorMenu",
         ),
-        ("SOFTWARE\\Microsoft\\Windows\\DWM", "SystemColorPrevalentAccent"),
+        (
+            "SOFTWARE\\Microsoft\\Windows\\DWM",
+            "SystemColorPrevalentAccent",
+        ),
     ] {
         if let Some(value) = read_registry_dword(path, name) {
             return value & 0xFFFFFF;
         }
     }
-    if let Some(value) = read_registry_dword("SOFTWARE\\Microsoft\\Windows\\DWM", "ColorizationColor")
+    if let Some(value) =
+        read_registry_dword("SOFTWARE\\Microsoft\\Windows\\DWM", "ColorizationColor")
     {
         let rgb = value & 0xFFFFFF;
         return ((rgb & 0xFF) << 16) | (rgb & 0xFF00) | ((rgb >> 16) & 0xFF);
@@ -659,6 +663,7 @@ fn native_records(
     worker: &Path,
     source: &Path,
     stop: &AtomicBool,
+    allow_write: bool,
 ) -> Result<Option<Vec<serde_json::Value>>, String> {
     if !worker.is_file() {
         return Err("The Rust backend worker is missing. Rebuild the development package.".into());
@@ -694,11 +699,11 @@ fn native_records(
     let started = std::time::Instant::now();
     let mut killed = false;
     let exit = loop {
-        if stop.load(Ordering::Relaxed) && !killed {
+        if !allow_write && stop.load(Ordering::Relaxed) && !killed {
             let _ = child.kill();
             killed = true;
         }
-        if !killed && started.elapsed() > Duration::from_secs(120) {
+        if !allow_write && !killed && started.elapsed() > Duration::from_secs(120) {
             let _ = child.kill();
             killed = true;
         }
@@ -739,8 +744,8 @@ fn native_records(
     if terminal["version"] != 1 {
         return Err("The Rust backend returned an unsupported result version.".into());
     }
-    if terminal["read_only"] != true {
-        return Err("The Rust backend did not confirm this request was read-only.".into());
+    if terminal["read_only"] != !allow_write {
+        return Err("The Rust backend returned an inconsistent operation safety state.".into());
     }
     let exit_code = exit.code().unwrap_or(-1);
     if terminal["ok"] != true {
@@ -749,7 +754,7 @@ fn native_records(
         }
         return Err(terminal["message"]
             .as_str()
-            .unwrap_or("The Rust backend could not complete this read-only operation.")
+            .unwrap_or("The Rust backend could not complete this operation.")
             .to_owned());
     }
     if exit_code != 0 {
@@ -771,7 +776,7 @@ fn native_check(
         "include_music": options.music,
         "folder_paths": options.folder_paths,
     });
-    let Some(records) = native_records(request, worker, source, stop)? else {
+    let Some(records) = native_records(request, worker, source, stop, false)? else {
         return Ok(WorkerResult {
             exit_code: 3,
             message: "Read-only check stopped. No folder settings or files were changed.".into(),
@@ -839,7 +844,7 @@ fn native_setup_preview(
     stop: &AtomicBool,
 ) -> Result<WorkerResult, String> {
     let request = setup_preview_request(options);
-    let Some(records) = native_records(request, worker, source, stop)? else {
+    let Some(records) = native_records(request, worker, source, stop, false)? else {
         return Ok(WorkerResult {
             exit_code: 3,
             message: "Read-only preview stopped. No folder settings or files were changed.".into(),
@@ -853,7 +858,11 @@ fn native_setup_preview(
     if previews.len() != 1 {
         return Err("The Rust backend returned no unique setup preview.".into());
     }
-    setup_preview_result(&previews[0]["preview"])
+    let token = previews[0]["approval_token"]
+        .as_str()
+        .filter(|value| value.len() == 64)
+        .ok_or("The Rust setup preview omitted its review token.")?;
+    setup_preview_result(&previews[0]["preview"], token)
 }
 
 fn native_restore_preview(
@@ -863,7 +872,7 @@ fn native_restore_preview(
     stop: &AtomicBool,
 ) -> Result<WorkerResult, String> {
     let request = restore_preview_request(options)?;
-    let Some(records) = native_records(request, worker, source, stop)? else {
+    let Some(records) = native_records(request, worker, source, stop, false)? else {
         return Ok(WorkerResult {
             exit_code: 3,
             message: "Read-only preview stopped. No folder settings or files were changed.".into(),
@@ -877,7 +886,76 @@ fn native_restore_preview(
     if previews.len() != 1 {
         return Err("The Rust backend returned no unique recovery preview.".into());
     }
-    restore_preview_result(&previews[0]["preview"], &options.backup)
+    let token = previews[0]["approval_token"]
+        .as_str()
+        .filter(|value| value.len() == 64)
+        .ok_or("The Rust recovery preview omitted its review token.")?;
+    restore_preview_result(&previews[0]["preview"], &options.backup, token)
+}
+
+fn native_reset_preview(
+    options: &Options,
+    worker: &Path,
+    source: &Path,
+    stop: &AtomicBool,
+) -> Result<WorkerResult, String> {
+    let request = reset_preview_request(options);
+    let Some(records) = native_records(request, worker, source, stop, false)? else {
+        return Ok(WorkerResult {
+            exit_code: 3,
+            message: "Read-only preview stopped. No folder settings or files were changed.".into(),
+            text: String::new(),
+        });
+    };
+    let previews: Vec<_> = records
+        .iter()
+        .filter(|record| record["type"] == "folder_preview")
+        .collect();
+    if previews.len() != 1 {
+        return Err("The Rust backend returned no unique reset preview.".into());
+    }
+    let token = previews[0]["approval_token"]
+        .as_str()
+        .filter(|value| value.len() == 64)
+        .ok_or("The Rust reset preview omitted its review token.")?;
+    reset_preview_result(&previews[0]["preview"], token)
+}
+
+fn native_apply(
+    options: &Options,
+    worker: &Path,
+    source: &Path,
+    approval_token: Option<&str>,
+    stop: &AtomicBool,
+) -> Result<WorkerResult, String> {
+    let token = approval_token
+        .filter(|token| token.len() == 64 && token.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .ok_or("The current review token is missing. Preview again before applying.")?;
+    let request = match options.action.as_str() {
+        "Set up iCloud folders" => setup_apply_request(options, token),
+        "Reset to Windows defaults" => reset_apply_request(options, token),
+        "Restore a recovery backup" => restore_apply_request(options, token)?,
+        _ => return Err("This Rust operation does not have a native Apply route.".into()),
+    };
+    let Some(records) = native_records(request, worker, source, stop, true)? else {
+        return Err("The settings operation did not return a result. Inspect the recovery folder before retrying.".into());
+    };
+    let applied: Vec<_> = records
+        .iter()
+        .filter(|record| record["type"] == "settings_apply")
+        .collect();
+    if applied.len() != 1 || applied[0]["recovery_backup"].as_str().is_none() {
+        return Err("The Rust backend returned no unique verified settings result.".into());
+    }
+    let report = serde_json::json!({
+        "Operation": applied[0]["operation"],
+        "RecoveryBackup": applied[0]["recovery_backup"],
+    });
+    Ok(WorkerResult {
+        exit_code: 0,
+        message: "Folder settings were applied and verified. Sign out and back in before checking Explorer and applications.".into(),
+        text: serde_json::to_string(&report).map_err(|error| error.to_string())?,
+    })
 }
 
 fn setup_preview_request(options: &Options) -> serde_json::Value {
@@ -892,6 +970,38 @@ fn setup_preview_request(options: &Options) -> serde_json::Value {
     })
 }
 
+fn setup_apply_request(options: &Options, preview_token: &str) -> serde_json::Value {
+    serde_json::json!({
+        "version": 1,
+        "operation": "setup_apply",
+        "root": options.root,
+        "include_music": options.music,
+        "allow_existing_content": options.keep_files,
+        "verified_sync_root": options.verified,
+        "folder_paths": options.folder_paths,
+        "confirmed": true,
+        "preview_token": preview_token,
+    })
+}
+
+fn reset_preview_request(options: &Options) -> serde_json::Value {
+    serde_json::json!({
+        "version": 1,
+        "operation": "reset_preview",
+        "allow_existing_content": options.keep_files,
+    })
+}
+
+fn reset_apply_request(options: &Options, preview_token: &str) -> serde_json::Value {
+    serde_json::json!({
+        "version": 1,
+        "operation": "reset_apply",
+        "allow_existing_content": options.keep_files,
+        "confirmed": true,
+        "preview_token": preview_token,
+    })
+}
+
 fn restore_preview_request(options: &Options) -> Result<serde_json::Value, String> {
     if options.backup.trim().is_empty() {
         return Err("Choose a recovery backup file before running the restore preview.".into());
@@ -903,7 +1013,26 @@ fn restore_preview_request(options: &Options) -> Result<serde_json::Value, Strin
     }))
 }
 
-fn setup_preview_result(preview: &serde_json::Value) -> Result<WorkerResult, String> {
+fn restore_apply_request(
+    options: &Options,
+    preview_token: &str,
+) -> Result<serde_json::Value, String> {
+    if options.backup.trim().is_empty() {
+        return Err("Choose a recovery backup file before applying the restore.".into());
+    }
+    Ok(serde_json::json!({
+        "version": 1,
+        "operation": "restore_apply",
+        "path": options.backup,
+        "confirmed": true,
+        "preview_token": preview_token,
+    }))
+}
+
+fn setup_preview_result(
+    preview: &serde_json::Value,
+    approval_token: &str,
+) -> Result<WorkerResult, String> {
     let root = preview["root"]
         .as_str()
         .filter(|value| !value.is_empty())
@@ -967,6 +1096,7 @@ fn setup_preview_result(preview: &serde_json::Value) -> Result<WorkerResult, Str
         "VerifiedSyncRoot": verified_sync_root,
         "ReviewGatesPassed": gates_passed,
         "RecoveryRoot": recovery_root,
+        "ApprovalToken": approval_token,
         "Rows": rows,
         "ContentWarnings": warnings,
     });
@@ -975,7 +1105,81 @@ fn setup_preview_result(preview: &serde_json::Value) -> Result<WorkerResult, Str
         message: if gates_passed {
             "Setup preview is ready. Review the proposed folder locations.".into()
         } else {
-            "Setup preview needs attention. Apply remains unavailable until its review checks pass.".into()
+            "Setup preview needs attention. Apply remains unavailable until its review checks pass."
+                .into()
+        },
+        text: serde_json::to_string(&report).map_err(|error| error.to_string())?,
+    })
+}
+
+fn reset_preview_result(
+    preview: &serde_json::Value,
+    approval_token: &str,
+) -> Result<WorkerResult, String> {
+    if preview["operation"] != "reset" {
+        return Err("The Rust backend returned the wrong preview type for reset.".into());
+    }
+    let recovery_root = preview["recovery_root"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .ok_or("The Rust reset preview omitted the recovery folder.")?;
+    let worker_gates_passed = preview["review_gates_passed"]
+        .as_bool()
+        .ok_or("The Rust reset preview omitted its review-gate result.")?;
+    let warnings = preview["content_warnings"]
+        .as_array()
+        .ok_or("The Rust reset preview omitted its content warnings.")?;
+    if warnings.iter().any(|warning| warning.as_str().is_none()) {
+        return Err("The Rust reset preview returned an invalid content warning.".into());
+    }
+    let rows = preview["rows"]
+        .as_array()
+        .ok_or("The Rust reset preview omitted its folder rows.")?
+        .iter()
+        .map(|row| -> Result<serde_json::Value, String> {
+            let folder = row["folder"]
+                .as_str()
+                .filter(|value| !value.is_empty())
+                .ok_or("The Rust reset preview returned a row without a folder name.")?;
+            let proposed = row["proposed"]
+                .as_str()
+                .filter(|value| !value.is_empty())
+                .ok_or("The Rust reset preview returned a row without a proposed path.")?;
+            let action = row["action"]
+                .as_str()
+                .filter(|value| !value.is_empty())
+                .ok_or("The Rust reset preview returned a row without an action.")?;
+            let current = &row["current"];
+            if !(current.is_null() || current.is_string()) {
+                return Err("The Rust reset preview returned an invalid current path.".into());
+            }
+            Ok(serde_json::json!({
+                "Folder": folder,
+                "Current": current,
+                "Proposed": proposed,
+                "Action": action,
+            }))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    if rows.is_empty() {
+        return Err("The Rust reset preview returned no managed folders.".into());
+    }
+    let gates_passed = worker_gates_passed && warnings.is_empty();
+    let report = serde_json::json!({
+        "Operation": "reset",
+        "ReviewGatesPassed": gates_passed,
+        "RecoveryRoot": recovery_root,
+        "ApprovalToken": approval_token,
+        "Rows": rows,
+        "ContentWarnings": warnings,
+    });
+    Ok(WorkerResult {
+        exit_code: if gates_passed { 0 } else { 3 },
+        message: if gates_passed {
+            "Reset preview is ready. Review every proposed Windows folder location.".into()
+        } else {
+            "Reset preview needs attention. Apply remains unavailable until its review checks pass."
+                .into()
         },
         text: serde_json::to_string(&report).map_err(|error| error.to_string())?,
     })
@@ -984,6 +1188,7 @@ fn setup_preview_result(preview: &serde_json::Value) -> Result<WorkerResult, Str
 fn restore_preview_result(
     preview: &serde_json::Value,
     backup_path: &str,
+    approval_token: &str,
 ) -> Result<WorkerResult, String> {
     if preview["operation"] != "restore" {
         return Err("The Rust backend returned the wrong preview type for recovery.".into());
@@ -1015,14 +1220,15 @@ fn restore_preview_result(
                 .as_str()
                 .filter(|value| !value.is_empty())
                 .ok_or("The Rust recovery preview returned a row without an action.")?;
-            let kind_is_valid = |kind: &serde_json::Value, exists: bool| match (exists, kind.as_str()) {
-                (true, Some(value)) => {
-                    value.eq_ignore_ascii_case("String")
-                        || value.eq_ignore_ascii_case("ExpandString")
-                }
-                (false, None) => true,
-                _ => false,
-            };
+            let kind_is_valid =
+                |kind: &serde_json::Value, exists: bool| match (exists, kind.as_str()) {
+                    (true, Some(value)) => {
+                        value.eq_ignore_ascii_case("String")
+                            || value.eq_ignore_ascii_case("ExpandString")
+                    }
+                    (false, None) => true,
+                    _ => false,
+                };
             if !(current.is_null() || current.as_str().is_some_and(|value| !value.is_empty()))
                 || !(proposed.is_null() || proposed.as_str().is_some_and(|value| !value.is_empty()))
                 || current_exists != current.is_string()
@@ -1059,6 +1265,7 @@ fn restore_preview_result(
     let report = serde_json::json!({
         "BackupPath": backup_path,
         "RecoveryRoot": recovery_root,
+        "ApprovalToken": approval_token,
         "Rows": rows,
     });
     Ok(WorkerResult {
@@ -1109,6 +1316,7 @@ impl Drop for CancelEvent {
 fn operation(
     options: Options,
     phase: String,
+    review_token: Option<String>,
     stop: Arc<AtomicBool>,
     sender: mpsc::SyncSender<WorkerMessage>,
 ) -> Result<WorkerResult, String> {
@@ -1116,20 +1324,42 @@ fn operation(
         .get()
         .cloned()
         .ok_or("The application source directory is unavailable.")?;
-    if options.action == "Check iCloud configuration"
+    let native_apply_requested = phase == "Apply"
+        && review_token.is_some()
+        && matches!(
+            options.action.as_str(),
+            "Set up iCloud folders" | "Reset to Windows defaults" | "Restore a recovery backup"
+        );
+    let needs_native = options.action == "Check iCloud configuration"
         || (options.action == "Set up iCloud folders" && phase == "Preview")
+        || (options.action == "Reset to Windows defaults" && phase == "Preview")
         || (options.action == "Restore a recovery backup" && phase == "DryRun")
-    {
+        || native_apply_requested;
+    if needs_native {
         let configured = std::env::var_os("ICLOUD_NATIVE_BACKEND").map(PathBuf::from);
         let bundled = source.join("RustUI/icloud-folder-worker.exe");
         if let Some(worker) = configured.or_else(|| bundled.is_file().then_some(bundled)) {
             return if options.action == "Check iCloud configuration" {
                 native_check(&options, &worker, &source, &stop)
             } else if options.action == "Set up iCloud folders" {
-                native_setup_preview(&options, &worker, &source, &stop)
+                if phase == "Preview" {
+                    native_setup_preview(&options, &worker, &source, &stop)
+                } else {
+                    native_apply(&options, &worker, &source, review_token.as_deref(), &stop)
+                }
+            } else if options.action == "Reset to Windows defaults" {
+                if phase == "Preview" {
+                    native_reset_preview(&options, &worker, &source, &stop)
+                } else {
+                    native_apply(&options, &worker, &source, review_token.as_deref(), &stop)
+                }
+            } else if native_apply_requested {
+                native_apply(&options, &worker, &source, review_token.as_deref(), &stop)
             } else {
                 native_restore_preview(&options, &worker, &source, &stop)
             };
+        } else if native_apply_requested {
+            return Err("The Rust backend required by this reviewed Apply is missing. Rebuild the development package; no settings were changed.".into());
         }
     }
     let bridge = source.join("tools/Invoke-WinUIBridge.ps1");
@@ -1816,6 +2046,7 @@ impl State {
             install,
             desktop_shortcut,
             reviewed: None,
+            review_token: None,
             running_options: None,
             running_phase: String::new(),
             raw: String::new(),
@@ -2032,7 +2263,11 @@ impl State {
             } else {
                 "ItemsView"
             });
-            let cfd = wide(if dark != 0 { "DarkMode_CFD" } else { "Explorer" });
+            let cfd = wide(if dark != 0 {
+                "DarkMode_CFD"
+            } else {
+                "Explorer"
+            });
             let header = SendMessageW(self.table, LVM_GETHEADER, 0, 0) as HWND;
             let mut windows: Vec<HWND> = self.fixed.iter().map(|(window, _)| *window).collect();
             windows.extend([
@@ -2089,30 +2324,15 @@ impl State {
                 allow_dark_mode(window, self.theme.dark);
                 SetWindowTheme(window, name.as_ptr(), null_mut());
             }
-            SendMessageW(
-                self.table,
-                LVM_SETBKCOLOR,
-                0,
-                self.theme.field as isize,
-            );
+            SendMessageW(self.table, LVM_SETBKCOLOR, 0, self.theme.field as isize);
             SendMessageW(
                 self.table,
                 LVM_SETTEXTCOLOR,
                 0,
                 self.theme.field_text as isize,
             );
-            SendMessageW(
-                self.table,
-                LVM_SETTEXTBKCOLOR,
-                0,
-                self.theme.field as isize,
-            );
-            SendMessageW(
-                self.progress,
-                PBM_SETBKCOLOR,
-                0,
-                self.theme.field as isize,
-            );
+            SendMessageW(self.table, LVM_SETTEXTBKCOLOR, 0, self.theme.field as isize);
+            SendMessageW(self.progress, PBM_SETBKCOLOR, 0, self.theme.field as isize);
             SendMessageW(
                 self.progress,
                 PBM_SETBARCOLOR,
@@ -2230,6 +2450,7 @@ impl State {
     }
     fn invalidate(&mut self) {
         self.reviewed = None;
+        self.review_token = None;
         self.table_ready = false;
         self.raw.clear();
         self.friendly.clear();
@@ -2357,7 +2578,11 @@ impl State {
             } else {
                 content_width
             };
-            let right_x = if two_pane { margin + left_w + gap } else { margin };
+            let right_x = if two_pane {
+                margin + left_w + gap
+            } else {
+                margin
+            };
             let right_w = if two_pane {
                 (width - margin - right_x).max(280)
             } else {
@@ -2391,18 +2616,18 @@ impl State {
                 result_y,
             ) = if tight {
                 (
-                    6, 20, 28, 20, 50, 220, 78, 78, 74, 22, 102, 26, 130, 26, 23, 22, 2, 20,
-                    27, 32, 114, 130, 26, 158,
+                    6, 20, 28, 20, 50, 220, 78, 78, 74, 22, 102, 26, 130, 26, 23, 22, 2, 20, 27,
+                    32, 114, 130, 26, 158,
                 )
             } else if compact {
                 (
-                    8, 22, 34, 28, 64, 240, 96, 96, 92, 25, 124, 29, 156, 30, 26, 24, 3, 22,
-                    30, 42, 142, 160, 28, 192,
+                    8, 22, 34, 28, 64, 240, 96, 96, 92, 25, 124, 29, 156, 30, 26, 24, 3, 22, 30,
+                    42, 142, 160, 28, 192,
                 )
             } else {
                 (
-                    12, 26, 42, 38, 84, 280, 132, 132, 128, 28, 166, 32, 204, 36, 28, 28, 4,
-                    26, 32, 52, 190, 208, 30, 244,
+                    12, 26, 42, 38, 84, 280, 132, 132, 128, 28, 166, 32, 204, 36, 28, 28, 4, 26,
+                    32, 52, 190, 208, 30, 244,
                 )
             };
             let checkbox_step = checkbox_h + 2;
@@ -2522,7 +2747,13 @@ impl State {
                         top + status_h + 60,
                     )
                 };
-            put(self.status_label, status_x, status_top, status_width, status_h);
+            put(
+                self.status_label,
+                status_x,
+                status_top,
+                status_width,
+                status_h,
+            );
             put(self.progress, status_x, progress_top, status_width, 12);
             put(
                 self.technical,
@@ -2534,7 +2765,13 @@ impl State {
             let table_top = result_top + scaled(24, self.dpi);
             let result_height = (viewport - result_top - 8).max(80);
             let table_height = (viewport - table_top - 8).max(80);
-            put(self.status, status_x, result_top, status_width, result_height);
+            put(
+                self.status,
+                status_x,
+                result_top,
+                status_width,
+                result_height,
+            );
             put(
                 self.table_label,
                 status_x,
@@ -2548,10 +2785,7 @@ impl State {
             let column2 = if status_width < 360 { 56 } else { 64 };
             let column3 = 56;
             let column1 = (status_width - column0 - column2 - column3).max(60);
-            for (index, w) in [column0, column1, column2, column3]
-                .into_iter()
-                .enumerate()
-            {
+            for (index, w) in [column0, column1, column2, column3].into_iter().enumerate() {
                 SendMessageW(
                     self.table,
                     LVM_SETCOLUMNWIDTH,
@@ -2792,12 +3026,7 @@ impl State {
             .unwrap_or(false)
         {
             if let Ok(report) = serde_json::from_str::<serde_json::Value>(result.text.trim()) {
-                self.set_table_headers([
-                    "Folder / check",
-                    "Current location",
-                    "Matches",
-                    "Exists",
-                ]);
+                self.set_table_headers(["Folder / check", "Current location", "Matches", "Exists"]);
                 unsafe {
                     SendMessageW(self.table, LVM_DELETEALLITEMS, 0, 0);
                 }
@@ -3002,7 +3231,13 @@ impl State {
         self.start(options, phase);
     }
     fn start(&mut self, options: Options, phase: &str) {
+        let review_token = if phase == "Apply" {
+            self.review_token.take()
+        } else {
+            None
+        };
         self.reviewed = None;
+        self.review_token = None;
         self.table_ready = false;
         self.running_options = Some(options.clone());
         self.running_phase = phase.into();
@@ -3013,7 +3248,7 @@ impl State {
         match thread::Builder::new()
             .name("folder-operation".into())
             .spawn(move || {
-                let result = operation(options, phase, stop, send.clone());
+                let result = operation(options, phase, review_token, stop, send.clone());
                 let _ = send.send(WorkerMessage::Finished(result));
             }) {
             Ok(_) => {
@@ -3085,6 +3320,12 @@ impl State {
                                     .unwrap_or(false)
                             {
                                 self.reviewed = self.running_options.clone();
+                                self.review_token =
+                                    serde_json::from_str::<serde_json::Value>(result.text.trim())
+                                        .ok()
+                                        .and_then(|report| {
+                                            report["ApprovalToken"].as_str().map(str::to_owned)
+                                        });
                             }
                             self.show_report(&result);
                         }
@@ -3624,7 +3865,57 @@ mod tests {
         assert_eq!(request["include_music"], true);
         assert_eq!(request["verified_sync_root"], true);
         assert_eq!(request["allow_existing_content"], true);
-        assert_eq!(request["folder_paths"]["Desktop"], "C:\\Drive\\Work Desktop");
+        assert_eq!(
+            request["folder_paths"]["Desktop"],
+            "C:\\Drive\\Work Desktop"
+        );
+    }
+    #[test]
+    fn reset_preview_and_apply_are_bound_to_review_token() {
+        let options = Options {
+            action: "Reset to Windows defaults".into(),
+            root: String::new(),
+            backup: String::new(),
+            music: false,
+            verified: false,
+            keep_files: true,
+            json: false,
+            desktop_shortcut: false,
+            folder_paths: Default::default(),
+        };
+        let preview_request = reset_preview_request(&options);
+        assert_eq!(preview_request["operation"], "reset_preview");
+        assert_eq!(preview_request["allow_existing_content"], true);
+
+        let token = "C".repeat(64);
+        let preview = serde_json::json!({
+            "operation":"reset",
+            "review_gates_passed":true,
+            "recovery_root":"C:\\Users\\Test\\AppData\\Local\\ICloudFolderSettler\\Recovery",
+            "content_warnings":[],
+            "rows":[{"folder":"Desktop","current":"D:\\Desktop","proposed":"C:\\Users\\Test\\Desktop","action":"Update value"}]
+        });
+        let result = reset_preview_result(&preview, &token).unwrap();
+        let report: serde_json::Value = serde_json::from_str(&result.text).unwrap();
+        assert_eq!(report["ApprovalToken"], token);
+        assert_eq!(report["Operation"], "reset");
+        assert_eq!(report["ReviewGatesPassed"], true);
+        assert_eq!(report["Rows"][0]["Proposed"], "C:\\Users\\Test\\Desktop");
+
+        let mut blocked_preview = preview.clone();
+        blocked_preview["review_gates_passed"] = false.into();
+        blocked_preview["content_warnings"] = serde_json::json!(["Existing content needs review."]);
+        let blocked = reset_preview_result(&blocked_preview, &token).unwrap();
+        assert_eq!(blocked.exit_code, 3);
+        assert!(blocked.message.contains("Apply remains unavailable"));
+        let blocked_report: serde_json::Value = serde_json::from_str(&blocked.text).unwrap();
+        assert_eq!(blocked_report["ReviewGatesPassed"], false);
+
+        let apply = reset_apply_request(&options, &token);
+        assert_eq!(apply["operation"], "reset_apply");
+        assert_eq!(apply["confirmed"], true);
+        assert_eq!(apply["preview_token"], token);
+        assert!(reset_preview_result(&serde_json::json!({"operation":"setup"}), &token).is_err());
     }
     #[test]
     fn setup_preview_retains_rows_and_never_passes_failed_review_gates() {
@@ -3637,22 +3928,44 @@ mod tests {
             "rows":[{"folder":"Desktop","current":null,"proposed":"C:\\Drive\\Desktop","action":"Add missing value"}],
             "content_warnings":["Existing content needs review."]
         });
-        let blocked = setup_preview_result(&preview).unwrap();
+        let token = "A".repeat(64);
+        let blocked = setup_preview_result(&preview, &token).unwrap();
         assert_eq!(blocked.exit_code, 3);
         assert!(blocked.message.contains("Apply remains unavailable"));
         let report: serde_json::Value = serde_json::from_str(&blocked.text).unwrap();
+        assert_eq!(report["ApprovalToken"], token);
         assert_eq!(report["Rows"][0]["Current"], serde_json::Value::Null);
         assert_eq!(report["Rows"][0]["Proposed"], "C:\\Drive\\Desktop");
-        assert_eq!(report["ContentWarnings"][0], "Existing content needs review.");
+        assert_eq!(
+            report["ContentWarnings"][0],
+            "Existing content needs review."
+        );
 
         preview["review_gates_passed"] = true.into();
         preview["content_warnings"] = serde_json::json!([]);
-        let accepted = setup_preview_result(&preview).unwrap();
+        let accepted = setup_preview_result(&preview, &token).unwrap();
         assert_eq!(accepted.exit_code, 0);
         assert!(accepted.message.contains("Setup preview is ready"));
+        let apply = setup_apply_request(
+            &Options {
+                action: ACTIONS[0].into(),
+                root: "C:\\Drive".into(),
+                backup: String::new(),
+                music: true,
+                verified: true,
+                keep_files: true,
+                json: false,
+                desktop_shortcut: false,
+                folder_paths: Default::default(),
+            },
+            &token,
+        );
+        assert_eq!(apply["operation"], "setup_apply");
+        assert_eq!(apply["confirmed"], true);
+        assert_eq!(apply["preview_token"], token);
 
         preview["rows"] = serde_json::json!([]);
-        assert!(setup_preview_result(&preview).is_err());
+        assert!(setup_preview_result(&preview, &token).is_err());
     }
     #[test]
     fn restore_preview_request_preserves_selected_backup_path() {
@@ -3685,10 +3998,12 @@ mod tests {
                 {"folder":"Downloads","current_exists":true,"current_kind":"ExpandString","current":"%USERPROFILE%\\Downloads","proposed_exists":false,"proposed_kind":null,"proposed":null,"action":"Remove value"}
             ]
         });
-        let result = restore_preview_result(&preview, "C:\\Recovery\\before.json").unwrap();
+        let token = "B".repeat(64);
+        let result = restore_preview_result(&preview, "C:\\Recovery\\before.json", &token).unwrap();
         assert_eq!(result.exit_code, 0);
         assert!(result.message.contains("Review every proposed location"));
         let report: serde_json::Value = serde_json::from_str(&result.text).unwrap();
+        assert_eq!(report["ApprovalToken"], token);
         assert_eq!(report["BackupPath"], "C:\\Recovery\\before.json");
         assert_eq!(report["Rows"][0]["Current"], "%USERPROFILE%\\Documents");
         assert_eq!(report["Rows"][0]["ProposedKind"], "String");
@@ -3696,10 +4011,29 @@ mod tests {
         assert_eq!(report["Rows"][1]["Proposed"], serde_json::Value::Null);
         assert_eq!(report["Rows"][1]["Action"], "Remove value");
 
+        let restore = restore_apply_request(
+            &Options {
+                action: ACTIONS[2].into(),
+                root: String::new(),
+                backup: "C:\\Recovery\\before.json".into(),
+                music: false,
+                verified: false,
+                keep_files: false,
+                json: false,
+                desktop_shortcut: false,
+                folder_paths: Default::default(),
+            },
+            &token,
+        )
+        .unwrap();
+        assert_eq!(restore["operation"], "restore_apply");
+        assert_eq!(restore["confirmed"], true);
+        assert_eq!(restore["preview_token"], token);
+
         preview["rows"][1]["proposed_exists"] = true.into();
-        assert!(restore_preview_result(&preview, "C:\\Recovery\\before.json").is_err());
+        assert!(restore_preview_result(&preview, "C:\\Recovery\\before.json", &token).is_err());
         preview["operation"] = "setup".into();
-        assert!(restore_preview_result(&preview, "C:\\Recovery\\before.json").is_err());
+        assert!(restore_preview_result(&preview, "C:\\Recovery\\before.json", &token).is_err());
     }
     #[test]
     fn output_is_bounded_but_drained() {
