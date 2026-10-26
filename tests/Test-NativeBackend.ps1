@@ -22,6 +22,10 @@ function Assert($Value,[string]$Message){
         if($env:GITHUB_STEP_SUMMARY -and (Test-Path -LiteralPath $env:GITHUB_STEP_SUMMARY)){
             [IO.File]::AppendAllText($env:GITHUB_STEP_SUMMARY,"Native backend assertion: $safeMessage`n")
         }
+        if($env:RUNNER_TEMP){
+            $assertionPath=Join-Path $env:RUNNER_TEMP 'ICloudNativeBackendAssertion.txt'
+            [IO.File]::WriteAllText($assertionPath,$safeMessage,(New-Object Text.UTF8Encoding($false)))
+        }
         throw 'Native backend assertion failed.'
     }
 }

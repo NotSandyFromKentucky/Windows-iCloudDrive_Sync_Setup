@@ -95,6 +95,14 @@ jobs:
       - name: Verify guarded native registry parity
         shell: powershell
         run: ./tests/Test-NativeBackend.ps1 -WorkerPath $env:ICLOUD_BACKEND_WORKER
+      - name: Retain redacted native assertion label
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: native-backend-assertion
+          path: ${{ runner.temp }}/ICloudNativeBackendAssertion.txt
+          if-no-files-found: ignore
+          retention-days: 14
       - name: Verify guarded Cloud Files hydration
         shell: powershell
         run: ./tests/Test-NativeCloudFiles.ps1 -Snapshot $env:ICLOUD_BACKEND_SNAPSHOT
