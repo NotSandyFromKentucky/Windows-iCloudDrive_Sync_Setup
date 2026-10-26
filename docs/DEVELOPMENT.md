@@ -15,6 +15,8 @@
 | .github/workflows/ | Windows CI matrix and gated version-tag publication. |
 | .local/ | Ignored local artifacts, logs, screenshots and evidence; never package or commit. |
 
+This layout follows runtime boundaries instead of adding a generic `src/` layer: PowerShell entry points and modules stay at the root because extracted packages, Explorer shortcuts and scripts depend on those paths; the Rust worker and UI have separate build roots; tests, build policy, release tools and documentation each have one home. For new work, extend the owning module and its established test suite instead of adding numbered or ad hoc duplicate scripts. Keep machine-specific caches and bulky run evidence out of release inputs. This checkout currently keeps them under ignored `.local/` for compatibility with existing builders; moving them outside the iCloud-synced tree requires centralizing and verifying all cache paths first.
+
 Runtime files stay together at the root to preserve extracted-package paths, installed shortcuts, GUI worker lookup and existing CLI entry points. Do not relocate or delete compatibility wrappers just because a graphical alternative exists.
 
 ## Local verification
