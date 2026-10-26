@@ -559,11 +559,15 @@ try{
             $resetApproval=[string]$resetApplyPreview[0].approval_token
             Assert ($resetApproval -match '^[A-Fa-f0-9]{64}$' -and $resetApplyPreview[0].preview.review_gates_passed) 'Isolated reset preview was not ready to apply'
             $failedResetRequest=([ordered]@{version=1;operation='reset_apply';allow_existing_content=$true;confirmed=$true;preview_token=$resetApproval}|ConvertTo-Json -Compress)
+            $rollbackBaseline=@(foreach($item in $expected){
+                $value=& $module {param($name) Read-FolderValue $name} $item.value_name
+                [pscustomobject]@{Name=$item.value_name;Exists=$value.Exists;Kind=$value.Kind;Data=$value.Data}
+            })
             $failureValueName=[string]($expected|Where-Object relative_path -ceq 'Pictures'|Select-Object -First 1 -ExpandProperty value_name)
             Assert (-not [string]::IsNullOrEmpty($failureValueName)) 'Central folder metadata omitted the Pictures registry value'
             $failedReset=Invoke-Worker $failedResetRequest $false $failureValueName
             Assert ($failedReset[-1].message -like '*Windows error *Rollback verified.*') 'Injected native registry failure did not return a Win32 error after verified rollback'
-            foreach($originalValue in $writtenBackup.Values){
+            foreach($originalValue in $rollbackBaseline){
                 $actualValue=& $module {param($name) Read-FolderValue $name} $originalValue.Name
                 Assert ($actualValue.Exists -eq $originalValue.Exists -and [string]::Equals($actualValue.Kind,$originalValue.Kind,[StringComparison]::Ordinal) -and [string]::Equals($actualValue.Data,$originalValue.Data,[StringComparison]::Ordinal)) ('Native rollback after a Win32 write failure did not restore '+$originalValue.Name)
             }
