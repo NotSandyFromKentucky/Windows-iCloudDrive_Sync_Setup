@@ -74,7 +74,11 @@ try{
             $actualFolder=@($nativeDefaults.folders|Where-Object {$_.folder -ceq $expectedFolder.folder})
             Assert ($actualFolder.Count -eq 1 -and [string]::Equals($actualFolder[0].path,$expectedFolder.path,[StringComparison]::OrdinalIgnoreCase)) ('Rust Known Folder API differs for '+$expectedFolder.folder)
         }
-        $resetMap=@(& $module { Get-FolderMap -IncludeMusic -SystemDefaults })
+        # Preserve the OrderedDictionary as one keyed object. Wrapping this
+        # command in @() turns it into an array, whose string-key lookup
+        # silently returns $null in Windows PowerShell 5.1.
+        $resetMap=& $module { Get-FolderMap -IncludeMusic -SystemDefaults }
+        Assert ($resetMap -is [System.Collections.IDictionary]) 'PowerShell reset mapping did not remain keyed'
         foreach($name in $resetMap.Keys){$relative=$expected|Where-Object {$_.value_name -ceq $name}|Select-Object -First 1;$folder=if($relative.relative_path -eq 'Videos\Captures'){'Captures'}else{$relative.relative_path};$default=$expectedDefaults|Where-Object {$_.folder -ceq $folder}|Select-Object -First 1;Assert ([string]::Equals($resetMap[$name],$default.path,[StringComparison]::OrdinalIgnoreCase)) ('Windows reset mapping changed for '+$name)}
         'PASS: Rust resolves Windows default folders through SHGetKnownFolderPath without writes'
     }
