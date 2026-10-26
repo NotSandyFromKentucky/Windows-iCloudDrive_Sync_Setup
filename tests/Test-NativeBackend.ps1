@@ -141,10 +141,10 @@ try{
     $checkRecords=Invoke-Worker $checkRequest
     $check=$checkRecords[0].check
     Assert ($checkRecords[0].type -ceq 'check' -and $check.registry_values.Count -eq $expected.Count) 'Read-only check omitted mapped registry aliases'
-    $resolvedCheckCount=@($check.resolved_folders).Count
-    Assert ($resolvedCheckCount -eq $expectedCurrent.Count) ('Read-only check resolved '+$resolvedCheckCount+' current folders; PowerShell resolved '+$expectedCurrent.Count)
-    Assert ($check.cloud_sync -ceq 'Not verified by this read-only check.') 'Read-only check overstated cloud verification'
     $referenceCheck=@(& $module {param($root) Test-ICloudFolderSetup -ICloudRoot $root -IncludeMusic} $fixture)
+    $resolvedCheckCount=@($check.resolved_folders).Count
+    Assert ($resolvedCheckCount -eq $referenceCheck.ResolvedFolders.Count) ('Read-only check returned '+$resolvedCheckCount+' resolved rows; PowerShell returned '+$referenceCheck.ResolvedFolders.Count)
+    Assert ($check.cloud_sync -ceq 'Not verified by this read-only check.') 'Read-only check overstated cloud verification'
     Assert ($check.root_exists -eq $referenceCheck.RootExists -and $check.root_registered -eq $referenceCheck.RootRegistered) 'Rust root existence or registration differs from the PowerShell checker'
     Assert ($check.user_sid -ceq $referenceCheck.UserSid) 'Rust current-user SID differs from the PowerShell checker'
     Assert ($check.registry_values.Count -eq $referenceCheck.RegistryValues.Count) 'Rust and PowerShell checker registry row counts differ'
@@ -229,11 +229,7 @@ try{
 } finally {
         try{foreach($providerName in $registrationOwned){$registrationBase.DeleteSubKeyTree($providerName,$false)}}finally{$registrationBase.Dispose()}
     }
-    $rustErrorLabels=@($check.errors|ForEach-Object{if($_ -match '^Cannot resolve the Windows current folder for (Desktop|Documents|Pictures|Videos|Music|Captures):'){$label='KnownFolder='+$matches[1];$parts=$_.Split('(');if($parts.Count -gt 1){$label+=' '+$parts[-1].TrimEnd(')')};$label}elseif($_ -like 'Registry path*'){'RegistryPath'}else{'Other'}}) -join '|'
-    $nativeCaptureRows=@($check.resolved_folders|Where-Object folder -ceq 'Videos\Captures')
-    $powershellCaptureRows=@($referenceCheck.ResolvedFolders|Where-Object Folder -ceq 'Videos\Captures')
-    $captureState='native='+$nativeCaptureRows.Count+'/'+[bool]($nativeCaptureRows.Count -and $null -ne $nativeCaptureRows[0].current)+' PowerShell='+$powershellCaptureRows.Count+'/'+[bool]($powershellCaptureRows.Count -and $null -ne $powershellCaptureRows[0].Current)
-    Assert ($check.errors.Count -eq $referenceCheck.Errors.Count) ('Rust and PowerShell checker error counts differ (Rust='+$check.errors.Count+', PowerShell='+$referenceCheck.Errors.Count+', Rust labels='+$rustErrorLabels+', '+$captureState+')')
+    Assert ($check.errors.Count -eq $referenceCheck.Errors.Count) ('Rust and PowerShell checker error counts differ (Rust='+$check.errors.Count+', PowerShell='+$referenceCheck.Errors.Count+')')
     Assert ($check.healthy -eq $referenceCheck.Healthy) 'Rust and PowerShell checker health results differ'
     $withoutMusicRequest=@{version=1;operation='check';root=$fixture;include_music=$false}|ConvertTo-Json -Compress
     $withoutMusic=(Invoke-Worker $withoutMusicRequest)[0].check

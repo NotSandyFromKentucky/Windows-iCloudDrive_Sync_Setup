@@ -959,6 +959,10 @@ where
     (folders, errors)
 }
 
+fn is_missing_captures_folder(error: &str) -> bool {
+    error == "Cannot resolve the Windows current folder for Captures: SHGetKnownFolderPath failed (HRESULT 0x80070002)."
+}
+
 fn folder_paths(map: &[Mapping], flags: u32, purpose: &str) -> Result<Vec<FolderPath>> {
     let _apartment = ComApartment::initialize()?;
     let (folders, errors) = collect_folder_paths(map, true, purpose, |item| {
@@ -1164,7 +1168,16 @@ fn check(
             )],
         ),
     };
-    errors.extend(resolution_errors);
+    let mut missing_captures = false;
+    for error in resolution_errors {
+        if is_missing_captures_folder(&error) {
+            // PowerShell's shell:Captures lookup returns a null path without an error
+            // when this optional Known Folder is unavailable. Preserve that row below.
+            missing_captures = true;
+        } else {
+            errors.push(error);
+        }
+    }
     let mut resolved_folders = Vec::new();
     let mut seen = BTreeSet::new();
     for resolved in resolved_now {
@@ -1187,6 +1200,18 @@ fn check(
             expected,
             matches,
         });
+    }
+    if missing_captures && folders.contains_key("Captures") {
+        let folder = "Videos\\Captures".to_owned();
+        if seen.insert(folder.clone()) {
+            let expected = text(&folders["Captures"])?;
+            resolved_folders.push(ResolvedCheckRow {
+                folder,
+                current: None,
+                expected,
+                matches: false,
+            });
+        }
     }
     let healthy = root_exists
         && root_registered
@@ -2884,6 +2909,19 @@ mod tests {
         assert_eq!(errors.len(), 1);
         assert!(errors[0].contains("current folder for Documents"));
         assert!(errors[0].contains("fixture lookup failure"));
+    }
+
+    #[test]
+    fn unavailable_captures_path_matches_shell_namespace_null_semantics() {
+        assert!(is_missing_captures_folder(
+            "Cannot resolve the Windows current folder for Captures: SHGetKnownFolderPath failed (HRESULT 0x80070002)."
+        ));
+        assert!(!is_missing_captures_folder(
+            "Cannot resolve the Windows current folder for Captures: SHGetKnownFolderPath failed (HRESULT 0x80004005)."
+        ));
+        assert!(!is_missing_captures_folder(
+            "Cannot resolve the Windows current folder for Documents: SHGetKnownFolderPath failed (HRESULT 0x80070002)."
+        ));
     }
 
     #[test]
