@@ -8,11 +8,83 @@ function Assert($Condition,$Message){if(-not $Condition){throw $Message}}
 function Fail([scriptblock]$Action,[string]$Pattern){$message=$null;try{& $Action}catch{$message=$_.Exception.Message};Assert ($message -like ('*'+$Pattern+'*')) ("Expected "+$Pattern+"; got "+$message)}
 $module=Import-Module (Join-Path $repo 'ICloudFolderCopy.psm1') -Force -PassThru
 try{
+    $throttle=& $module {
+        $script:CopyProgressLastTimestamp=1000L;$script:CopyProgressLastStage='Verified'
+        $step=[long][Math]::Max(1,[Diagnostics.Stopwatch]::Frequency/10)
+        $suppressed=-not (Test-CopyProgressDue -Stage 'Verified' -Completed 2 -Total 10 -NowTicks (1000L+$step-1))
+        $interval=Test-CopyProgressDue -Stage 'Verified' -Completed 3 -Total 10 -NowTicks (1000L+$step)
+        $stage=Test-CopyProgressDue -Stage 'Copying and verifying' -Completed 3 -Total 10 -NowTicks (1000L+$step)
+        $final=Test-CopyProgressDue -Stage 'Verified' -Completed 10 -Total 10 -NowTicks (1000L+$step)
+        [pscustomobject]@{Suppressed=$suppressed;Interval=$interval;StageChange=$stage;Final=$final}
+    }
+    Assert ($throttle.Suppressed -and $throttle.Interval -and $throttle.StageChange -and $throttle.Final) 'Progress throttle failed its cadence, stage-change or final-update checks'
+    'PASS: copy progress is limited to 10 Hz while stage changes and the final verification remain visible'
+    $pageChecks=& $module {
+        $items=New-Object 'Collections.Generic.List[object]'
+        for($i=0;$i -lt 205;$i++){$items.Add([pscustomobject]@{Source=('C:\source\'+$i);Destination=('C:\target\'+$i);Directory=$false;Hash=([string]$i).PadLeft(64,'0');Action='Copy'})}
+        $token=Get-CopyPlanToken $items
+        $writer=New-Object IO.StringWriter;$original=[Console]::Out
+        try{
+            [Console]::SetOut($writer)
+            Write-CopyPlanPage -Plan $items -Offset 0 -Token $token
+            $firstJson=$writer.ToString().Trim();$first=ConvertFrom-Json ($firstJson.Substring(17))
+            $firstBytes=[Text.Encoding]::UTF8.GetByteCount($firstJson.Substring(17))
+            $writer.GetStringBuilder().Clear()|Out-Null
+            Write-CopyPlanPage -Plan $items -Offset $first.NextOffset -Token $token
+            $second=ConvertFrom-Json ($writer.ToString().Trim().Substring(17))
+            $writer.GetStringBuilder().Clear()|Out-Null
+            Write-CopyPlanPage -Plan $items -Offset $second.NextOffset -Token $token
+            $last=ConvertFrom-Json ($writer.ToString().Trim().Substring(17))
+        }finally{[Console]::SetOut($original);$writer.Dispose()}
+        $oldHash=$items[0].Hash;$items[0].Hash='F'*64;$changed=(Get-CopyPlanToken $items) -cne $token
+        $items[0].Hash=$oldHash
+        [pscustomobject]@{TokenValid=($token -match '^[a-f0-9]{64}$');ChangedPlanRejected=($changed);ByteBound=($firstBytes -le 512*1024);First=($first.Offset -eq 0 -and @($first.Entries).Count -eq 100 -and $first.NextOffset -eq 100);Second=($second.Offset -eq 100 -and @($second.Entries).Count -eq 100 -and $second.NextOffset -eq 200);Last=($last.Offset -eq 200 -and @($last.Entries).Count -eq 5 -and $null -eq $last.NextOffset);Total=($first.TotalEntries -eq 205 -and $second.TotalEntries -eq 205 -and $last.TotalEntries -eq 205)}
+    }
+    Assert ($pageChecks.TokenValid -and $pageChecks.ChangedPlanRejected -and $pageChecks.ByteBound -and $pageChecks.First -and $pageChecks.Second -and $pageChecks.Last -and $pageChecks.Total) 'Bounded copy review pages or full-plan approval token validation failed'
+    'PASS: copy review pages are bounded, complete, ordered and bound to the full plan'
+    $largePage=& $module {
+        $items=New-Object 'Collections.Generic.List[object]';$source='s'*40000;$destination='d'*40000
+        for($i=0;$i -lt 10;$i++){$items.Add([pscustomobject]@{Source=$source;Destination=$destination;Directory=$false;Hash=('0'*64);Action='Copy'})}
+        $writer=New-Object IO.StringWriter;$original=[Console]::Out
+        try{[Console]::SetOut($writer);Write-CopyPlanPage -Plan $items -Offset 0 -Token ('a'*64);$line=$writer.ToString().Trim();$page=ConvertFrom-Json ($line.Substring(17));[pscustomobject]@{Count=@($page.Entries).Count;Next=$page.NextOffset;Bytes=[Text.Encoding]::UTF8.GetByteCount($line.Substring(17))}}
+        finally{[Console]::SetOut($original);$writer.Dispose()}
+    }
+    Assert ($largePage.Count -gt 0 -and $largePage.Count -lt 10 -and $largePage.Next -eq $largePage.Count -and $largePage.Bytes -le 512*1024) 'Copy page did not stop at the UTF-8 byte budget'
+    'PASS: page sizing follows UTF-8 bytes as well as row count'
+    $oversized=[pscustomobject]@{Source=('a'*300000);Destination=('b'*300000);Directory=$false;Hash=('0'*64);Action='Copy'}
+    Fail {& $module {param($Entry) Write-CopyPlanPage -Plan @($Entry) -Offset 0 -Token ('a'*64)} $oversized} 'single copy-review row exceeds the bounded page size'
+    'PASS: a single oversized copy row fails closed'
     $source=Join-Path $fixture 'source';$target=Join-Path $fixture 'destination'
     $null=[IO.Directory]::CreateDirectory((Join-Path $source 'empty'))
     [IO.File]::WriteAllText((Join-Path $source 'a.txt'),'original')
+    $hiddenSource=Join-Path $source 'hidden.txt'
+    [IO.File]::WriteAllText($hiddenSource,'hidden source data')
+    [IO.File]::SetAttributes($hiddenSource,[IO.FileAttributes]::Hidden)
     [IO.File]::WriteAllText((Join-Path $source ('special ! '+[char]0x00E9+'.txt')),'unicode path')
     & $module {param($Source,$Target) $script:Pairs=@([pscustomobject]@{Source=$Source;Destination=$Target});function script:Get-CopyPairs { $script:Pairs }} $source $target
+    Fail {Invoke-ICloudFolderCopy -Apply -StructuredPage -ReviewToken ('0'*64)} 'Files changed after preview'
+    Assert (-not(Test-Path -LiteralPath $target)) 'A mismatched full-plan review token allowed destination writes'
+    'PASS: copy Apply rejects a stale or missing full-plan approval token before writes'
+    $enumerationSource=Join-Path $fixture 'enumeration-source';$enumerationTarget=Join-Path $fixture 'enumeration-destination'
+    $null=[IO.Directory]::CreateDirectory($enumerationSource)
+    [IO.File]::WriteAllText((Join-Path $enumerationSource 'first.txt'),'enumeration fixture')
+    $originalCancellation=& $module {(Get-Item Function:Test-CopyCancellation).ScriptBlock}
+    & $module {
+        param($Source,$Target)
+        $script:Pairs=@([pscustomobject]@{Source=$Source;Destination=$Target})
+        $script:EnumerationCancellationChecks=0
+        function script:Get-CopyPairs {$script:Pairs}
+        function script:Test-CopyCancellation {
+            $script:EnumerationCancellationChecks++
+            if($script:EnumerationCancellationChecks -eq 2){throw (New-Object OperationCanceledException('Injected cancellation during child enumeration.'))}
+        }
+    } $enumerationSource $enumerationTarget
+    try{
+        Fail {Invoke-ICloudFolderCopy -Apply} 'Injected cancellation during child enumeration'
+        Assert ((& $module {$script:EnumerationCancellationChecks}) -eq 2) 'Cancellation was not checked after the enumerator yielded a child.'
+        Assert (-not(Test-Path -LiteralPath $enumerationTarget)) 'Mid-enumeration cancellation wrote destination files.'
+    }finally{& $module {param($Original,$Source,$Target) Set-Item Function:script:Test-CopyCancellation -Value $Original;$script:Pairs=@([pscustomobject]@{Source=$Source;Destination=$Target})} $originalCancellation $source $target}
+    'PASS: cancellation is polled while lazily enumerating directory children'
     $channel='Local\ICloudCopy-'+[guid]::NewGuid().ToString('N')
     $cancel=New-Object Threading.EventWaitHandle($true,[Threading.EventResetMode]::ManualReset,$channel)
     try{Fail {Invoke-ICloudFolderCopy -Apply -CancelEventName $channel} 'safe boundary'}finally{$cancel.Dispose()}
@@ -26,11 +98,12 @@ try{
     Invoke-ICloudFolderCopy -Apply
     Assert ([IO.File]::ReadAllText((Join-Path $source 'a.txt')) -ceq 'original') 'Source content changed'
     Assert ((Get-FileHash (Join-Path $source 'a.txt')).Hash -ceq (Get-FileHash (Join-Path $target 'a.txt')).Hash) 'Copied content differs'
+    Assert ([IO.File]::ReadAllText((Join-Path $target 'hidden.txt')) -ceq 'hidden source data') 'Hidden source file was omitted'
     Assert (Test-Path (Join-Path $target 'empty') -PathType Container) 'Empty directory lost'
-    Assert (@(Get-ChildItem $target -File).Count -eq 2) 'Unicode file lost'
+    Assert (@(Get-ChildItem $target -Force -File).Count -eq 3) 'Unicode or hidden file lost'
     Invoke-ICloudFolderCopy -Apply
-    Assert (@(Get-ChildItem $target -File).Count -eq 2) 'Identical rerun duplicated files'
-    'PASS: copy verifies contents, preserves sources and empty folders, and skips identical files'
+    Assert (@(Get-ChildItem $target -Force -File).Count -eq 3) 'Identical rerun duplicated files'
+    'PASS: copy verifies contents, includes hidden files, preserves sources and empty folders, and skips identical files'
     [IO.File]::WriteAllText((Join-Path $target 'a.txt'),'different')
     [IO.File]::WriteAllText((Join-Path $source 'new.txt'),'new')
     Fail {Invoke-ICloudFolderCopy -Apply} 'nothing will be overwritten'
@@ -60,10 +133,11 @@ try{
         $script:Pairs=@([pscustomobject]@{Source=$Source;Destination=$Target})
         $script:OriginalHash=(Get-Item Function:Get-CopyHash).ScriptBlock
         $script:HashCalls=0
+        $script:FailAt=2*@([IO.Directory]::EnumerateFiles($Source)).Count+2
         function script:Get-CopyHash {
             param($Path)
             $script:HashCalls++
-            if($script:HashCalls -eq 8){throw 'Injected read failure'}
+            if($script:HashCalls -eq $script:FailAt){throw 'Injected read failure'}
             & $script:OriginalHash $Path
         }
     } $source $target2
@@ -97,10 +171,10 @@ try{
                 $script:OriginalPlan=(Get-Item Function:Get-CopyPlan).ScriptBlock
                 function script:Get-CopyPairs {[pscustomobject]@{Source=$script:RaceSource;Destination=$script:RaceTarget}}
                 function script:Get-CopyPlan {
-                    param([object[]]$Pairs)
+                    param([object[]]$Pairs,[switch]$PreserveList,[Collections.IList]$ExpectedPlan,[switch]$CompareExpectedPlan)
                     $script:PlanCalls++
                     if($script:PlanCalls -eq 2){& $script:Edit $script:RaceSource $script:RaceTarget}
-                    & $script:OriginalPlan $Pairs
+                    & $script:OriginalPlan -Pairs $Pairs -PreserveList:$PreserveList -ExpectedPlan $ExpectedPlan -CompareExpectedPlan:$CompareExpectedPlan
                 }
             } $raceSource $raceTarget $change.Edit
             Fail {& $raceModule {Invoke-ICloudFolderCopy -Apply}} 'Files changed after planning'

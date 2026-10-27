@@ -168,8 +168,17 @@ try {
     Expect-Failure { Invoke-ICloudFolders -RestoreBackup $invalidPath -Apply } 'Restore destination is unavailable'
     '{invalid JSON' | Set-Content -LiteralPath $invalidPath
     Expect-Failure { Invoke-ICloudFolders -RestoreBackup $invalidPath -Apply } ''
+    [IO.File]::WriteAllText($invalidPath, (' ' * 1048577))
+    Expect-Failure { Invoke-ICloudFolders -RestoreBackup $invalidPath -Apply } '1 MiB'
+    [IO.File]::WriteAllText($invalidPath, ('[' * 9) + ('0' * 10) + (']' * 9))
+    Expect-Failure { Invoke-ICloudFolders -RestoreBackup $invalidPath -Apply } '8-level nesting'
+    $bad = Get-Content -LiteralPath $original -Raw | ConvertFrom-Json
+    $bad.Values = @($bad.Values) + @($bad.Values[0])
+    while (@($bad.Values).Count -le 13) { $bad.Values += $bad.Values[0] }
+    $bad | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $invalidPath -Encoding UTF8
+    Expect-Failure { Invoke-ICloudFolders -RestoreBackup $invalidPath -Apply } 'too many registry values'
     Assert ((& $module { $script:WriteCount }) -eq $writeCount) 'Invalid backup changed settings'
-    Pass 'duplicate, invalid-type, unavailable-path and malformed backups are rejected before writes'
+    Pass 'duplicate, invalid-type, unavailable-path and bounded-input backup failures are rejected before writes'
 
     $savedRead = & $module { (Get-Item Function:Read-FolderValue).ScriptBlock }
     & $module { function script:Read-FolderValue { param($Name) throw 'Injected registry access denied' } }

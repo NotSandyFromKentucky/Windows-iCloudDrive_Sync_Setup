@@ -4,6 +4,17 @@ on:
     branches: [main, 'codex/**']
   pull_request:
   workflow_dispatch:
+    inputs:
+      arm64_rust_only:
+        description: Run only the native Windows ARM64 Rust checks
+        type: boolean
+        required: false
+        default: false
+      rust_preview_x64_only:
+        description: Run only the x64 Rust preview package checks
+        type: boolean
+        required: false
+        default: false
   workflow_call:
 
 permissions:
@@ -11,6 +22,7 @@ permissions:
 
 jobs:
   unit:
+    if: ${{ github.event_name != 'workflow_dispatch' || (inputs.arm64_rust_only != true && inputs.rust_preview_x64_only != true) }}
     name: Tests (${{ matrix.os }}, ${{ matrix.shell }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
@@ -37,14 +49,19 @@ jobs:
           & ./tests/Test-ICloudFolders.ps1
           & ./tests/Test-ExplorerLauncher.ps1
           & ./tests/Test-Diagnostics.ps1
+          & ./tests/Test-RoundTripState.ps1
+          & ./tests/Test-SetupOutputBounds.ps1
+          & ./tests/Test-FolderDefinitionResource.ps1
           & ./tests/Test-HiddenDesktop.ps1
           & ./tests/Test-ContrastQuery.ps1
           & ./tests/Test-SetupUI.ps1
+          & ./tests/Test-WinUIBridgeCopyPage.ps1
           & ./tests/Test-InstallerIntegrity.ps1
           & ./tests/Test-ReleaseInputs.ps1
           & ./tests/Test-FolderCopy.ps1
           & ./tests/Test-UserExperience.ps1
   integration:
+    if: ${{ github.event_name != 'workflow_dispatch' || (inputs.arm64_rust_only != true && inputs.rust_preview_x64_only != true) }}
     name: Isolated real writes (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
@@ -72,6 +89,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
   native-backend:
+    if: ${{ github.event_name != 'workflow_dispatch' || (inputs.arm64_rust_only != true && inputs.rust_preview_x64_only != true) }}
     name: Rust backend and UI integration
     runs-on: windows-2025
     timeout-minutes: 25
@@ -128,7 +146,144 @@ jobs:
           $package = ./tools/New-RustUIPackage.ps1 -BuildInfo (Join-Path $build.Snapshot 'build-info.json') -BackendBuildInfo (Join-Path $backend.Snapshot 'build-info.json')
           ./tests/Test-RustUIPackage.ps1 -PackageDirectory $package.Directory -RunNativeIntegration
           ./tests/Test-RustUIHighContrast.ps1 -WorkerPath $build.WorkerPath
+  native-rust-arm64:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.arm64_rust_only == true }}
+    name: Native Rust checks (Windows ARM64)
+    runs-on: windows-11-arm
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Confirm native ARM64 Rust host
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $architecture = [System.Runtime.InteropServices.Architecture]::Arm64
+          if ([System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture -ne $architecture -or
+              [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne $architecture) {
+            throw 'This job must execute natively on Windows ARM64.'
+          }
+          $hostLine = rustc -vV | Where-Object { $_ -like 'host: *' }
+          if ($LASTEXITCODE -ne 0 -or $hostLine -ne 'host: aarch64-pc-windows-msvc') {
+            throw 'Rust must use the native aarch64-pc-windows-msvc host target.'
+          }
+          rustc --version
+          cargo --version
+      - name: Build and run native Rust unit suites
+        id: rust_build
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $backend = ./tools/Build-NativeBackend.ps1 -Test
+          $ui = ./tools/Build-RustUI.ps1 -Test
+          ./tests/Test-RustUI.ps1 -WorkerPath $ui.WorkerPath -BackendWorkerPath $backend.WorkerPath -RunNativeIntegration -NoHiddenDesktop
+          ./tests/Test-NativeCloudFiles.ps1 -Snapshot $backend.Snapshot -NoHiddenDesktop
+          $package = ./tools/New-RustUIPackage.ps1 -BuildInfo (Join-Path $ui.Snapshot 'build-info.json') -BackendBuildInfo (Join-Path $backend.Snapshot 'build-info.json')
+          ./tests/Test-RustUIPackage.ps1 -PackageDirectory $package.Directory -RunNativeIntegration -NoHiddenDesktop
+          $env:CARGO_TARGET_DIR = Join-Path $backend.Snapshot 'target'
+          $env:ICLOUD_FOLDER_MAP_PATH = Join-Path $backend.Snapshot 'folder-map.json'
+          cargo fmt --manifest-path (Join-Path $backend.Snapshot 'Cargo.toml') -- --check
+          if ($LASTEXITCODE) { throw 'ARM64 backend formatting check failed.' }
+          cargo clippy --locked --manifest-path (Join-Path $backend.Snapshot 'Cargo.toml') --all-targets -- -D warnings
+          if ($LASTEXITCODE) { throw 'ARM64 backend Clippy failed.' }
+          $env:CARGO_TARGET_DIR = Join-Path $ui.Snapshot 'target'
+          $env:ICLOUD_FOLDER_MAP_PATH = Join-Path $ui.Snapshot 'folder-map.json'
+          cargo fmt --manifest-path (Join-Path $ui.Snapshot 'Cargo.toml') -- --check
+          if ($LASTEXITCODE) { throw 'ARM64 UI formatting check failed.' }
+          cargo clippy --locked --manifest-path (Join-Path $ui.Snapshot 'Cargo.toml') --all-targets -- -D warnings
+          if ($LASTEXITCODE) { throw 'ARM64 UI Clippy failed.' }
+          function Assert-Arm64Pe([string]$Path) {
+            $stream = [IO.File]::OpenRead($Path)
+            try {
+              $reader = New-Object IO.BinaryReader($stream)
+              $stream.Position = 0x3c
+              $peOffset = $reader.ReadInt32()
+              $stream.Position = $peOffset
+              if ($reader.ReadUInt32() -ne 0x00004550 -or $reader.ReadUInt16() -ne 0xAA64) {
+                throw 'A Rust release executable is not a valid ARM64 PE.'
+              }
+            } finally { $stream.Dispose() }
+          }
+          Assert-Arm64Pe $backend.WorkerPath
+          Assert-Arm64Pe $ui.WorkerPath
+          $records = @('{"version":1,"operation":"metadata"}' | & $backend.WorkerPath | ForEach-Object { $_ | ConvertFrom-Json })
+          if ($LASTEXITCODE -ne 0 -or $records.Count -lt 2 -or $records[0].type -ne 'metadata' -or
+              $records[0].mappings.Count -ne 13 -or $records[-1].type -ne 'result' -or $records[-1].ok -ne $true) {
+            throw 'The native ARM64 worker metadata protocol check failed.'
+          }
+          Write-Output 'PASS: native ARM64 backend/UI unit suites, release PE architecture and read-only worker protocol.'
+  native-rust-x64-preview:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.rust_preview_x64_only == true }}
+    name: Rust x64 preview package install and launch
+    runs-on: windows-2025
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Confirm hosted native x64 Rust host
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $architecture = [System.Runtime.InteropServices.Architecture]::X64
+          if ([System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture -ne $architecture -or
+              [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne $architecture) {
+            throw 'This job must execute natively on Windows x64.'
+          }
+          $hostLine = rustc -vV | Where-Object { $_ -like 'host: *' }
+          if ($LASTEXITCODE -ne 0 -or $hostLine -ne 'host: x86_64-pc-windows-msvc') {
+            throw 'Rust must use the native x86_64-pc-windows-msvc host target.'
+          }
+          if ((./tests/Assert-IsolatedEnvironment.ps1) -ne 'GitHubHosted') {
+            throw 'This install and launch fixture requires an isolated GitHub-hosted runner.'
+          }
+          rustc --version
+          cargo --version
+      - name: Build, install and verify the x64 Rust preview package
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $backend = ./tools/Build-NativeBackend.ps1 -Test
+          $ui = ./tools/Build-RustUI.ps1 -Test
+          ./tests/Test-RustUI.ps1 -WorkerPath $ui.WorkerPath -BackendWorkerPath $backend.WorkerPath -RunNativeIntegration -NoHiddenDesktop
+          ./tests/Test-NativeCloudFiles.ps1 -Snapshot $backend.Snapshot -NoHiddenDesktop
+          $package = ./tools/New-RustUIPackage.ps1 -BuildInfo (Join-Path $ui.Snapshot 'build-info.json') -BackendBuildInfo (Join-Path $backend.Snapshot 'build-info.json')
+          ./tests/Test-RustUIPackage.ps1 -PackageDirectory $package.Directory -RunNativeIntegration -NoHiddenDesktop
+          $env:CARGO_TARGET_DIR = Join-Path $backend.Snapshot 'target'
+          $env:ICLOUD_FOLDER_MAP_PATH = Join-Path $backend.Snapshot 'folder-map.json'
+          cargo fmt --manifest-path (Join-Path $backend.Snapshot 'Cargo.toml') -- --check
+          if ($LASTEXITCODE) { throw 'x64 backend formatting check failed.' }
+          cargo clippy --locked --manifest-path (Join-Path $backend.Snapshot 'Cargo.toml') --all-targets -- -D warnings
+          if ($LASTEXITCODE) { throw 'x64 backend Clippy failed.' }
+          $env:CARGO_TARGET_DIR = Join-Path $ui.Snapshot 'target'
+          $env:ICLOUD_FOLDER_MAP_PATH = Join-Path $ui.Snapshot 'folder-map.json'
+          cargo fmt --manifest-path (Join-Path $ui.Snapshot 'Cargo.toml') -- --check
+          if ($LASTEXITCODE) { throw 'x64 UI formatting check failed.' }
+          cargo clippy --locked --manifest-path (Join-Path $ui.Snapshot 'Cargo.toml') --all-targets -- -D warnings
+          if ($LASTEXITCODE) { throw 'x64 UI Clippy failed.' }
+          function Assert-X64Pe([string]$Path) {
+            $stream = [IO.File]::OpenRead($Path)
+            try {
+              $reader = New-Object IO.BinaryReader($stream)
+              $stream.Position = 0x3c
+              $peOffset = $reader.ReadInt32()
+              $stream.Position = $peOffset
+              if ($reader.ReadUInt32() -ne 0x00004550 -or $reader.ReadUInt16() -ne 0x8664) {
+                throw "A Rust release executable is not a valid x64 PE: $Path"
+              }
+            } finally { $stream.Dispose() }
+          }
+          Assert-X64Pe $backend.WorkerPath
+          Assert-X64Pe $ui.WorkerPath
+          $records = @('{"version":1,"operation":"metadata"}' | & $backend.WorkerPath | ForEach-Object { $_ | ConvertFrom-Json })
+          if ($LASTEXITCODE -ne 0 -or $records.Count -lt 2 -or $records[0].type -ne 'metadata' -or
+              $records[0].mappings.Count -ne 13 -or $records[-1].type -ne 'result' -or $records[-1].ok -ne $true) {
+            throw 'The native x64 worker metadata protocol check failed.'
+          }
+          Write-Output 'PASS: x64 backend/UI unit suites, visible preview install/launch fixture, package integrity, PE architecture and read-only worker protocol.'
   native-ui:
+    if: ${{ github.event_name != 'workflow_dispatch' || (inputs.arm64_rust_only != true && inputs.rust_preview_x64_only != true) }}
     name: Native WinUI build and hidden-desktop fixtures
     runs-on: windows-2025
     timeout-minutes: 15
@@ -178,6 +333,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
   package:
+    if: ${{ github.event_name != 'workflow_dispatch' || (inputs.arm64_rust_only != true && inputs.rust_preview_x64_only != true) }}
     name: Package verification
     needs: [unit, integration, native-ui]
     runs-on: windows-2025

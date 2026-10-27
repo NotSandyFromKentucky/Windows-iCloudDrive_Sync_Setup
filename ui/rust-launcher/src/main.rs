@@ -51,7 +51,7 @@ fn build_ui(repo: &Path) -> Result<PathBuf, String> {
 
     // Run PowerShell build script and capture output
     let output = Command::new("powershell.exe")
-        .args(&[
+        .args([
             "-NoProfile",
             "-ExecutionPolicy",
             "Bypass",

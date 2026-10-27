@@ -100,8 +100,9 @@ public static class SetupAccessibilityProbe {
     $null=[IO.Directory]::CreateDirectory($source)
     [IO.File]::WriteAllText((Join-Path $source 'a.txt'),'first')
     [IO.File]::WriteAllText((Join-Path $source 'b.txt'),'second')
-    $window=New-SetupWindow -Source $fixture -InitialAction 'Copy files into Windows default folders' -ConfirmAction {$true}
+    $window=New-SetupWindow -Source $fixture -InitialAction 'Copy files into iCloud folders' -ConfirmAction {$true}
     try{
+        $window.Root.Text=$source
         $window.Form.Show();[Windows.Forms.Application]::DoEvents()
         $window.Preview.PerformClick();Wait-Ui {$window.Preview.Enabled}
         Assert $window.Apply.Enabled ('Copy preview did not enable reviewed copy: '+$window.Output.Text)

@@ -4,6 +4,43 @@ param([ValidateSet('Start','Check','Cleanup')][string]$Mode='Check', [string]$St
 $ErrorActionPreference='Stop'
 $repo=Split-Path $PSScriptRoot -Parent
 if (-not $StatePath) { $StatePath=Join-Path $repo '.local\sync-verification.json' }
+function Read-BoundedRoundTripState {
+    param([Parameter(Mandatory)][string]$Path)
+    $stream=[IO.File]::Open($Path,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
+    try {
+        if($stream.Length -gt 128KB){throw 'Round-trip state exceeds the supported 128 KiB size limit.'}
+        $reader=[IO.StreamReader]::new($stream,[Text.Encoding]::UTF8,$true)
+        try{$json=$reader.ReadToEnd()}finally{$reader.Dispose()}
+    }finally{$stream.Dispose()}
+    $depth=0;$inString=$false;$escaped=$false
+    for($index=0;$index -lt $json.Length;$index++){
+        $character=$json[$index]
+        if($inString){
+            if($escaped){$escaped=$false;continue}
+            if($character -eq '\'){$escaped=$true;continue}
+            if($character -eq '"'){$inString=$false}
+            continue
+        }
+        if($character -eq '"'){$inString=$true;continue}
+        if($character -eq '{' -or $character -eq '['){$depth++;if($depth -gt 2){throw 'Round-trip state exceeds the supported 2-level nesting limit.'}}
+        elseif($character -eq '}' -or $character -eq ']'){$depth--;if($depth -lt 0){throw 'Round-trip state has invalid nesting.'}}
+    }
+    if($inString -or $depth -ne 0){throw 'Round-trip state has invalid nesting.'}
+    $state=ConvertFrom-Json -InputObject $json
+    $expected=@('Path','FileName','ReturnPath','ReturnName','Token','Sha256','CreatedUtc','Verified')
+    $properties=@($state.PSObject.Properties)
+    if($properties.Count -ne $expected.Count){throw 'Round-trip state has an unsupported schema.'}
+    $propertyNames=@($properties|ForEach-Object {$_.Name})
+    foreach($name in $expected){if($propertyNames -cnotcontains $name){throw 'Round-trip state has an unsupported schema.'}}
+    foreach($name in @('Path','FileName','ReturnPath','ReturnName','Token','Sha256','CreatedUtc')){
+        $value=$state.$name
+        # PowerShell 7 may automatically parse ISO timestamps while 5.1 keeps them as strings.
+        if($name -ceq 'CreatedUtc' -and $value -is [DateTime]){$value=$value.ToString('o')}
+        if($value -isnot [string] -or $value.Length -gt 32767){throw 'Round-trip state string field is invalid or exceeds 32,767 characters.'}
+    }
+    if($state.Verified -isnot [bool]){throw 'Round-trip state Verified field is invalid.'}
+    return $state
+}
 if ($Mode -eq 'Start') {
     if (Test-Path -LiteralPath $StatePath) { throw 'A round-trip session already exists. Check or clean it up before starting another.' }
     $docs=[Environment]::GetFolderPath('MyDocuments')
@@ -29,7 +66,7 @@ if ($Mode -eq 'Start') {
         ConvertTo-Json | Set-Content -LiteralPath $StatePath -Encoding UTF8
 }
 if (-not (Test-Path -LiteralPath $StatePath)) { throw 'No sync session exists. Use -Mode Start.' }
-$state=Get-Content -LiteralPath $StatePath -Raw | ConvertFrom-Json
+$state=Read-BoundedRoundTripState -Path $StatePath
 $docs=[Environment]::GetFolderPath('MyDocuments')
 if ($state.Token -notmatch '^[a-f0-9]{32}$' -or $state.FileName -cne ('ICloudFolderSetup-SyncTest-'+$state.Token.Substring(0,10)+'-upload.txt') -or $state.ReturnName -cne $state.FileName.Replace('-upload.txt','-returned.txt') -or [IO.Path]::GetFullPath($state.Path) -ine (Join-Path $docs $state.FileName) -or [IO.Path]::GetFullPath($state.ReturnPath) -ine (Join-Path $docs $state.ReturnName)) { throw 'Round-trip session paths or token are invalid for this account.' }
 if ($Mode -eq 'Cleanup') {

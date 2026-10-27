@@ -49,6 +49,8 @@
                                          "ui/ICloudFolderSetup/MainWindow.Folders.cs",
                                          "ui/ICloudFolderSetup/MainWindow.xaml",
                                          "ui/ICloudFolderSetup/MainWindow.xaml.cs",
+                                         "ICloudFolders.psm1",
+                                         "tools/Generate-FolderDefinitions.ps1",
                                          "ui/ICloudFolderSetup/packages.lock.json"
                                      ],
                      "DefaultRuntimeIdentifier":  "win-x64",
@@ -58,6 +60,7 @@
                                            "ICloudFolderSetup.exe",
                                            "ICloudFolderSetup.dll",
                                            "ICloudFolderSetup.deps.json",
+                                           "folder-definitions.json",
                                            "ICloudFolderSetup.runtimeconfig.json",
                                            "ICloudFolderSetup.pri",
                                            "Microsoft.ui.xaml.dll",

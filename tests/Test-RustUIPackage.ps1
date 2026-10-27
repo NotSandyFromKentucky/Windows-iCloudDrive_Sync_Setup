@@ -1,10 +1,15 @@
 #requires -Version 5.1
-param([Parameter(Mandatory)][string]$PackageDirectory,[switch]$RunNativeIntegration)
+param([Parameter(Mandatory)][string]$PackageDirectory,[switch]$RunNativeIntegration,[switch]$NoHiddenDesktop)
 $ErrorActionPreference='Stop'
 $repo=Split-Path $PSScriptRoot -Parent
 $PackageDirectory=(Resolve-Path -LiteralPath $PackageDirectory).Path
-if(-not $env:ICLOUD_TEST_DESKTOP){& (Join-Path $PSScriptRoot 'Invoke-HiddenDesktop.ps1') -ScriptPath $PSCommandPath -Parameters @{PackageDirectory=$PackageDirectory;RunNativeIntegration=$RunNativeIntegration.IsPresent} -TimeoutSeconds 180;return}
-if(& (Join-Path $PSScriptRoot 'Enter-TestDesktop.ps1') -ScriptPath $PSCommandPath){return}
+if(-not $env:ICLOUD_TEST_DESKTOP -and -not $NoHiddenDesktop){& (Join-Path $PSScriptRoot 'Invoke-HiddenDesktop.ps1') -ScriptPath $PSCommandPath -Parameters @{PackageDirectory=$PackageDirectory;RunNativeIntegration=$RunNativeIntegration.IsPresent} -TimeoutSeconds 180;return}
+if($NoHiddenDesktop){
+    $visibleEnvironment=& (Join-Path $PSScriptRoot 'Assert-IsolatedEnvironment.ps1')
+    if($visibleEnvironment -ne 'GitHubHosted'){throw 'NoHiddenDesktop package automation is restricted to a GitHub-hosted runner.'}
+    if($env:ICLOUD_TEST_DESKTOP){throw 'NoHiddenDesktop mode must run on the visible runner desktop.'}
+    if(-not ('ICloudTestDesktop' -as [type])){Add-Type -Path (Join-Path $PSScriptRoot 'HiddenDesktop.cs')}
+}elseif(& (Join-Path $PSScriptRoot 'Enter-TestDesktop.ps1') -ScriptPath $PSCommandPath){return}
 if($RunNativeIntegration){$isolation=& (Join-Path $PSScriptRoot 'Assert-IsolatedEnvironment.ps1');if($isolation -notin @('GitHubHosted','WindowsSandbox')){throw 'Native package integration tests require a disposable Windows environment.'}}
 Add-Type -AssemblyName System.Drawing,Accessibility
 Add-Type -Path (Join-Path $PSScriptRoot 'RustUIProbe.cs') -ReferencedAssemblies System.Drawing,Accessibility

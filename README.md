@@ -9,7 +9,7 @@ Download the ZIP from [GitHub Releases](https://github.com/NotSandyFromKentucky/
 - **Install for your account:** double-click **Install-ICloudFolderSetup.cmd**, then **Install for me**. A Start menu shortcut is created; a desktop shortcut is optional. After a successful installation, the extracted download can be removed.
 - **Run without installing:** double-click **Open-ICloudFolderSetup.cmd** and keep the extracted files together.
 
-Run normally as your own Windows account. Administrator access is unnecessary. Installation copies application files only; it does not configure folders or install iCloud. Release archives include SHA-256 checksums and a per-file manifest. Packages are unsigned; hashes do not authenticate the publisher. See the [changelog](CHANGELOG.md).
+Run normally as your own Windows account. Administrator access is unnecessary. Installation copies application files only; it does not configure folders or install iCloud. The installer validates bounded package metadata and per-file hashes before copying. Release archives include SHA-256 checksums and a per-file manifest. Packages are unsigned; hashes do not authenticate the publisher. See the [changelog](CHANGELOG.md).
 
 If installation reports changed or incomplete application files, extract a fresh copy of the release ZIP and retry. Existing installations and their shortcuts remain available when file verification fails before shortcut creation.
 
@@ -23,7 +23,7 @@ Registration confirms the configured Drive path, not synchronization health. See
 
 ## Use the graphical window
 
-Choose an action and its options, then click **Preview / Check** or **Dry run**. Review the displayed paths and warnings. An action-specific button becomes available only after a successful preview/dry run of the same options. Its confirmation names the action, with Cancel selected by default. Changing options invalidates the reviewed preview. The window remains responsive while operations run and cannot close until they finish. The production window scrolls at smaller sizes while action buttons remain visible; the experimental Rust UI adapts its two-pane layout without a main-window scrollbar. It uses Windows light/dark colors, pairs the system accent with restrained cloud blue, and keeps system colors in high contrast. Windows' native confirmation task dialog remains system-drawn and may stay light. Results use plain language; select **Technical details** for raw output and exit codes. Path fields and advanced options also expose their explanations to assistive technology. The Rust UI and worker remain an opt-in development preview. Hosted integration covers native copy Preview and Apply through the Rust UI; production launchers and copy still use WinUI and PowerShell.
+Choose an action and its options, then click **Preview / Check** or **Dry run**. Review the displayed paths and warnings. Large copy reviews use **Previous page** and **Next page**; Apply stays bound to a token for the complete plan, and a changed plan requires a fresh review. **Save current page** saves only the page currently displayed. An action-specific button becomes available only after a successful preview/dry run of the same options. Its confirmation names the action, with Cancel selected by default. Changing options invalidates the reviewed preview. The window remains responsive while operations run and cannot close until they finish. The production window scrolls at smaller sizes while action buttons remain visible; the experimental Rust UI adapts its two-pane layout without a main-window scrollbar. It uses Windows light/dark colors, pairs the system accent with restrained cloud blue, and keeps system colors in high contrast. Windows' native confirmation task dialog remains system-drawn and may stay light. Results use plain language; select **Technical details** for operation output and exit codes. Exceptionally large results are shortened to a bounded summary, with recovery and backup details retained. Path fields and advanced options also expose their explanations to assistive technology. The Rust UI and worker remain an opt-in development preview. Hosted integration covers native copy Preview and Apply through the Rust UI; production launchers and copy still use WinUI and PowerShell.
 
 | Action | What it does |
 | --- | --- |
@@ -42,7 +42,7 @@ For direct Explorer access, **Reset-WindowsFolderDefaults.cmd** opens reset mode
 
 ## Folder scope
 
-At startup, the window displays a loading status while it reads the shared folder definitions. Actions become available when loading finishes. Folder and navigation pictograms use Windows-provided icons alongside text labels.
+At startup, the window displays a loading status while it reads the build-generated folder definitions from the central folder map. Actions become available when loading finishes. This does not start a PowerShell worker just to load the destinations. Folder and navigation pictograms use Windows-provided icons alongside text labels.
 
 | Folder | Destination beneath the iCloud root | Setup default |
 | --- | --- | --- |
@@ -76,7 +76,7 @@ Before any folder-setting change, the tool creates and verifies a new account-bo
 %LOCALAPPDATA%\ICloudFolderSettler\Recovery\<timestamp>-<unique-id>\
 ~~~
 
-The window displays the backup and operation-log paths. Backups preserve exact unexpanded values, registry types and originally absent entries. Keep them local and retain them until the new configuration is verified. Use **Restore a recovery backup** to undo a setup or reset; restoration makes another backup first.
+The window displays the backup and operation-log paths. Backups preserve exact unexpanded values, registry types and originally absent entries. Restore accepts a bounded UTF-8 JSON backup (up to 1 MiB, eight nesting levels, and only the managed registry values). Keep backups local and retain them until the new configuration is verified. Use **Restore a recovery backup** to undo a setup or reset; restoration makes another backup first.
 
 Writes are checked. A failure triggers best-effort rollback, including removal of originally absent values. **ROLLBACK INCOMPLETE** identifies a recovery problem requiring attention. A crash or power loss cannot automatically roll back: use the printed backup manually. Newly created directories and their contents are never automatically removed.
 

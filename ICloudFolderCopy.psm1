@@ -1,6 +1,6 @@
 ﻿#requires -Version 5.1
 Set-StrictMode -Version Latest
-$script:CopyCancelHandle=$null;$script:CopyProgressEnabled=$false
+$script:CopyCancelHandle=$null;$script:CopyProgressEnabled=$false;$script:CopyProgressLastTimestamp=0L;$script:CopyProgressLastStage=$null
 function Assert-CopyPath {
     param([string]$Path)
     # Cloud Files reparse points are data placeholders; name-surrogate links are not.
@@ -82,15 +82,32 @@ function Test-CopyCancellation {
 function Send-CopyProgress {
     param([string]$Stage,[string]$File,[int]$Completed=0,[int]$Total=0)
     if($script:CopyProgressEnabled){
+        $now=[Diagnostics.Stopwatch]::GetTimestamp()
+        if(-not (Test-CopyProgressDue -Stage $Stage -Completed $Completed -Total $Total -NowTicks $now)){return}
         [Console]::Out.WriteLine(('@@ICloudProgress:'+([pscustomobject]@{Stage=$Stage;File=$File;Completed=$Completed;Total=$Total} | ConvertTo-Json -Compress)))
     }
 }
+function Test-CopyProgressDue {
+    param([string]$Stage,[int]$Completed,[int]$Total,[long]$NowTicks=[Diagnostics.Stopwatch]::GetTimestamp())
+    $changed=$script:CopyProgressLastStage -cne $Stage
+    $elapsed=$NowTicks-$script:CopyProgressLastTimestamp
+    $interval=[long][Math]::Max(1,[Diagnostics.Stopwatch]::Frequency/10)
+    $final=$Stage -ceq 'Verified' -and $Total -gt 0 -and $Completed -ge $Total
+    if($script:CopyProgressLastTimestamp -eq 0 -or $changed -or $final -or $elapsed -ge $interval){
+        $script:CopyProgressLastTimestamp=$NowTicks
+        $script:CopyProgressLastStage=$Stage
+        return $true
+    }
+    return $false
+}
 function Get-CopyPlan {
-    param([object[]]$Pairs)
-    $plan=New-Object Collections.Generic.List[object]
+    param([object[]]$Pairs,[switch]$PreserveList,[Collections.IList]$ExpectedPlan,[switch]$CompareExpectedPlan)
+    $plan=if($CompareExpectedPlan){$null}else{New-Object Collections.Generic.List[object]}
     $seen=@{}
+    $planIndex=0
     $sourceRoots=@($Pairs | ForEach-Object {[IO.Path]::GetFullPath($_.Source).TrimEnd('\')})
-    $queue=New-Object Collections.Queue
+    $roots=New-Object Collections.Queue
+    $enumerators=New-Object Collections.Stack
     foreach($pair in $Pairs){
         $source=[IO.Path]::GetFullPath($pair.Source).TrimEnd('\')
         $target=[IO.Path]::GetFullPath($pair.Destination).TrimEnd('\')
@@ -100,41 +117,102 @@ function Get-CopyPlan {
         }
         Assert-CopyPath $source;Assert-CopyPath $target
         if(-not(Test-Path -LiteralPath $source -PathType Container)){throw "Source folder is unavailable: $source"}
-        $queue.Enqueue([pscustomobject]@{Source=$source;Destination=$target})
+        $roots.Enqueue([pscustomobject]@{Source=$source;Destination=$target})
     }
-    while($queue.Count){
-        Test-CopyCancellation
-        $item=$queue.Dequeue();$source=$item.Source;$target=$item.Destination
-        Send-CopyProgress -Stage 'Reading files' -File $source
-        Assert-CopyPath $source;Assert-CopyPath $target
-        $sourceItem=Get-Item -LiteralPath $source -Force
-        if($sourceItem.Attributes -band [IO.FileAttributes]::Encrypted){throw "Encrypted files require a separate reviewed copy: $source"}
-        $isDirectory=$sourceItem.PSIsContainer
-        $hash=if($isDirectory){$null}else{Get-CopyHash $source}
-        if($seen.ContainsKey($target)){
-            $previous=$seen[$target]
-            if($previous.Directory -ne $isDirectory -or (-not $isDirectory -and $previous.Hash -cne $hash)){throw "Different source files map to the same destination: $target"}
-        }else{
-            $exists=Test-Path -LiteralPath $target
-            $status=if($exists){'Already identical'}else{'Copy'}
-            if($exists){
-                $destItem=Get-Item -LiteralPath $target -Force
-                if($destItem.PSIsContainer -ne $isDirectory){throw "File/folder conflict at destination: $target"}
-                if(-not $isDirectory -and (Get-CopyHash $target) -cne $hash){throw "Different file already exists; nothing will be overwritten: $target"}
+    try{
+        while($roots.Count -or $enumerators.Count){
+            Test-CopyCancellation
+            if($enumerators.Count){
+                $frame=$enumerators.Peek()
+                if($frame.Enumerator.MoveNext()){
+                    Test-CopyCancellation
+                    $childPath=[string]$frame.Enumerator.Current
+                    $childName=[IO.Path]::GetFileName($childPath.TrimEnd('\'))
+                    $item=[pscustomobject]@{Source=$childPath;Destination=(Join-Path $frame.Destination $childName)}
+                }else{
+                    $finished=$enumerators.Pop()
+                    $finished.Enumerator.Dispose()
+                    continue
+                }
+            }else{$item=$roots.Dequeue()}
+            $source=$item.Source;$target=$item.Destination
+            Send-CopyProgress -Stage 'Reading files' -File $source
+            Assert-CopyPath $source;Assert-CopyPath $target
+            $sourceItem=Get-Item -LiteralPath $source -Force
+            if($sourceItem.Attributes -band [IO.FileAttributes]::Encrypted){throw "Encrypted files require a separate reviewed copy: $source"}
+            $isDirectory=$sourceItem.PSIsContainer
+            $hash=if($isDirectory){$null}else{Get-CopyHash $source}
+            if($seen.ContainsKey($target)){
+                $previous=$seen[$target]
+                if($previous.Directory -ne $isDirectory -or (-not $isDirectory -and $previous.Hash -cne $hash)){throw "Different source files map to the same destination: $target"}
+            }else{
+                $exists=Test-Path -LiteralPath $target
+                $status=if($exists){'Already identical'}else{'Copy'}
+                if($exists){
+                    $destItem=Get-Item -LiteralPath $target -Force
+                    if($destItem.PSIsContainer -ne $isDirectory){throw "File/folder conflict at destination: $target"}
+                    if(-not $isDirectory -and (Get-CopyHash $target) -cne $hash){throw "Different file already exists; nothing will be overwritten: $target"}
+                }
+                $entry=[pscustomobject]@{Source=$source;Destination=$target;Directory=$isDirectory;Hash=$hash;Action=$status}
+                $seen[$target]=[pscustomobject]@{Directory=$isDirectory;Hash=$hash}
+                if($CompareExpectedPlan){
+                    if($planIndex -ge $ExpectedPlan.Count){throw 'Files changed after planning. Preview again.'}
+                    $expected=$ExpectedPlan[$planIndex]
+                    $ordinal=[StringComparer]::Ordinal
+                    if($expected.Directory -ne $entry.Directory -or -not $ordinal.Equals($expected.Source,$entry.Source) -or -not $ordinal.Equals($expected.Destination,$entry.Destination) -or -not $ordinal.Equals($expected.Hash,$entry.Hash) -or -not $ordinal.Equals($expected.Action,$entry.Action)){throw 'Files changed after planning. Preview again.'}
+                    $planIndex++
+                }else{$plan.Add($entry)}
             }
-            $entry=[pscustomobject]@{Source=$source;Destination=$target;Directory=$isDirectory;Hash=$hash;Action=$status}
-            $seen[$target]=$entry;$plan.Add($entry)
+            if($isDirectory){
+                # Keep one enumerator per active ancestor. The filesystem iterator
+                # yields child paths lazily, avoiding both a child array and a wide BFS queue.
+                $children=[IO.Directory]::EnumerateFileSystemEntries($source).GetEnumerator()
+                $enumerators.Push([pscustomobject]@{Source=$source;Destination=$target;Enumerator=$children})
+            }
         }
-        if($isDirectory){
-            foreach($child in @(Get-ChildItem -LiteralPath $source -Force -ErrorAction Stop)){
-                $queue.Enqueue([pscustomobject]@{Source=$child.FullName;Destination=(Join-Path $target $child.Name)})
-            }
+    }finally{
+        while($enumerators.Count){
+            $unfinished=$enumerators.Pop()
+            $unfinished.Enumerator.Dispose()
         }
     }
-    $plan.ToArray()
+    if($CompareExpectedPlan){if($planIndex -ne $ExpectedPlan.Count){throw 'Files changed after planning. Preview again.'};return}
+    if($PreserveList){Write-Output -NoEnumerate $plan}else{$plan.ToArray()}
+}
+function Get-CopyPlanToken {
+    param([Collections.IList]$Plan)
+    $hasher=[Security.Cryptography.IncrementalHash]::CreateHash([Security.Cryptography.HashAlgorithmName]::SHA256)
+    try{
+        foreach($entry in $Plan){
+            $fields=@([string]$entry.Source,[string]$entry.Destination,[bool]$entry.Directory,$entry.Hash,[string]$entry.Action)
+            $row=ConvertTo-Json -InputObject $fields -Compress -Depth 3
+            $hasher.AppendData([Text.Encoding]::UTF8.GetBytes($row))
+            $hasher.AppendData([byte[]]@(10))
+        }
+        [BitConverter]::ToString($hasher.GetHashAndReset()).Replace('-','').ToLowerInvariant()
+    }finally{$hasher.Dispose()}
+}
+function Write-CopyPlanPage {
+    param([Collections.IList]$Plan,[int]$Offset,[string]$Token)
+    if($Offset -lt 0 -or $Offset -gt $Plan.Count){throw 'Copy review page starts outside the reviewed plan.'}
+    $rows=New-Object Collections.Generic.List[object]
+    $limit=512*1024
+    for($index=$Offset;$index -lt $Plan.Count -and $rows.Count -lt 100;$index++){
+        $entry=$Plan[$index]
+        $rows.Add([pscustomobject][ordered]@{Source=$entry.Source;Destination=$entry.Destination;Directory=[bool]$entry.Directory;Action=$entry.Action})
+        $candidate=[ordered]@{Version=1;Type='copy_review_page';ApprovalToken=$Token;Offset=$Offset;NextOffset=$(if($Offset+$rows.Count -lt $Plan.Count){$Offset+$rows.Count}else{$null});TotalEntries=$Plan.Count;Entries=$rows.ToArray()}
+        $json=ConvertTo-Json -InputObject $candidate -Compress -Depth 4
+        if([Text.Encoding]::UTF8.GetByteCount($json) -gt $limit){
+            $rows.RemoveAt($rows.Count-1)
+            if($rows.Count -eq 0){throw 'A single copy-review row exceeds the bounded page size.'}
+            break
+        }
+    }
+    $response=[ordered]@{Version=1;Type='copy_review_page';ApprovalToken=$Token;Offset=$Offset;NextOffset=$(if($Offset+$rows.Count -lt $Plan.Count){$Offset+$rows.Count}else{$null});TotalEntries=$Plan.Count;Entries=$rows.ToArray()}
+    [Console]::Out.WriteLine(('@@ICloudCopyPage:'+ (ConvertTo-Json -InputObject $response -Compress -Depth 4)))
 }
 function Test-CopyPlansEqual {
-    param([object[]]$Expected,[object[]]$Actual)
+    param([Collections.IList]$Expected,[Collections.IList]$Actual)
     if($Expected.Count -ne $Actual.Count){return $false}
     $ordinal=[StringComparer]::Ordinal
     for($i=0;$i -lt $Expected.Count;$i++){
@@ -151,10 +229,10 @@ function Test-CopyPlansEqual {
 }
 function Invoke-ICloudFolderCopy {
     [CmdletBinding(SupportsShouldProcess)]
-    param([string]$ICloudRoot="$env:USERPROFILE\iCloudDrive",[switch]$ResetToDefaults,[switch]$IncludeMusic,[switch]$VerifiedSyncRoot,[switch]$Apply,[string]$CancelEventName,[switch]$ProgressEvents,[hashtable]$FolderPaths=@{})
+    param([string]$ICloudRoot="$env:USERPROFILE\iCloudDrive",[switch]$ResetToDefaults,[switch]$IncludeMusic,[switch]$VerifiedSyncRoot,[switch]$Apply,[string]$CancelEventName,[switch]$ProgressEvents,[hashtable]$FolderPaths=@{},[switch]$StructuredPage,[int]$PageOffset=0,[string]$ReviewToken='')
     $mutex=New-Object Threading.Mutex($false,('Local\ICloudFolders-'+[Security.Principal.WindowsIdentity]::GetCurrent().User.Value))
     $locked=$false
-    $script:CopyCancelHandle=$null;$script:CopyProgressEnabled=[bool]$ProgressEvents
+    $script:CopyCancelHandle=$null;$script:CopyProgressEnabled=[bool]$ProgressEvents;$script:CopyProgressLastTimestamp=0L;$script:CopyProgressLastStage=$null
     try{
         if($CancelEventName){
             if($CancelEventName -notmatch '^Local\\ICloudCopy-[a-f0-9]{32}$'){throw 'Invalid cancellation channel.'}
@@ -163,15 +241,18 @@ function Invoke-ICloudFolderCopy {
         try{$locked=$mutex.WaitOne(0)}catch [Threading.AbandonedMutexException]{$locked=$true}
         if(-not $locked){throw 'Another folder operation is running for this account.'}
         $pairs=@(Get-CopyPairs -ICloudRoot $ICloudRoot -ResetToDefaults:$ResetToDefaults -IncludeMusic:$IncludeMusic -VerifiedSyncRoot:$VerifiedSyncRoot -ForApply:$Apply -FolderPaths $FolderPaths)
-        $plan=@(Get-CopyPlan $pairs)
-        $plan | Select-Object Action,Source,Destination | Format-List | Out-Host
+        $plan=Get-CopyPlan -Pairs $pairs -PreserveList
+        $planToken=if($StructuredPage){Get-CopyPlanToken $plan}else{''}
+        if($StructuredPage -and $Apply -and -not $WhatIfPreference -and ($ReviewToken -notmatch '^[a-f0-9]{64}$' -or $ReviewToken -cne $planToken)){throw 'Files changed after preview. Review the current copy pages again.'}
+        if($StructuredPage){
+            if(-not $Apply -or $WhatIfPreference){Write-CopyPlanPage -Plan $plan -Offset $PageOffset -Token $planToken}
+            else{Write-Host 'Applying the reviewed copy plan.'}
+        }else{$plan | Select-Object Action,Source,Destination | Format-List | Out-Host}
         Write-Host 'Copy only: originals stay in place. Folder settings are not changed. Reading cloud files may download their contents.'
-        if(-not $Apply){Write-Host 'Preview only. No files or directories were written.';return}
+        if(-not $Apply){if(-not $StructuredPage){Write-Host 'Preview only. No files or directories were written.'};return}
         if(-not $PSCmdlet.ShouldProcess('Displayed file-copy plan','Copy missing files, verify SHA-256 and retain every original')){return}
         # Rebuild before the first write to reject changed source/destination content.
-        $fresh=@(Get-CopyPlan $pairs)
-        if(-not(Test-CopyPlansEqual -Expected $plan -Actual $fresh)){throw 'Files changed after planning. Preview again.'}
-        $fresh=$null
+        Get-CopyPlan -Pairs $pairs -ExpectedPlan $plan -CompareExpectedPlan
         $copied=0;$completed=0;$total=0
         foreach($entry in $plan){if(-not $entry.Directory){$total++}}
         try{

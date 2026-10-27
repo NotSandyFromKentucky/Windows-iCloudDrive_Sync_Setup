@@ -610,6 +610,126 @@ fn place(window: HWND, x: i32, y: i32, width: i32, height: i32, dpi: u32) {
 }
 
 const OUTPUT_LIMIT: usize = 2 * 1024 * 1024;
+const OUTPUT_TAIL_LIMIT: usize = 32 * 1024;
+const OVERFLOW_DIAGNOSTIC_LIMIT: usize = 24 * 1024;
+
+#[derive(Default)]
+struct BoundedOutput {
+    prefix: Vec<u8>,
+    suffix: Vec<u8>,
+    total_bytes: u64,
+}
+
+impl BoundedOutput {
+    fn push(&mut self, bytes: &[u8]) {
+        if bytes.is_empty() {
+            return;
+        }
+        self.total_bytes = self.total_bytes.saturating_add(bytes.len() as u64);
+        let prefix_limit = OUTPUT_LIMIT - OUTPUT_TAIL_LIMIT;
+        let keep = bytes
+            .len()
+            .min(prefix_limit.saturating_sub(self.prefix.len()));
+        self.prefix.extend_from_slice(&bytes[..keep]);
+
+        if bytes.len() >= OUTPUT_TAIL_LIMIT {
+            self.suffix.clear();
+            self.suffix
+                .extend_from_slice(&bytes[bytes.len() - OUTPUT_TAIL_LIMIT..]);
+        } else {
+            let remove = self
+                .suffix
+                .len()
+                .saturating_add(bytes.len())
+                .saturating_sub(OUTPUT_TAIL_LIMIT);
+            if remove > 0 {
+                drop(self.suffix.drain(..remove));
+            }
+            self.suffix.extend_from_slice(bytes);
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.total_bytes == 0
+    }
+
+    fn exceeded_limit(&self) -> bool {
+        self.total_bytes > OUTPUT_LIMIT as u64
+    }
+
+    fn as_bytes(&self) -> Vec<u8> {
+        let overlap = self
+            .prefix
+            .len()
+            .saturating_add(self.suffix.len())
+            .saturating_sub(self.total_bytes.min(usize::MAX as u64) as usize);
+        let mut bytes = Vec::with_capacity(self.prefix.len() + self.suffix.len());
+        bytes.extend_from_slice(&self.prefix);
+        bytes.extend_from_slice(&self.suffix[overlap.min(self.suffix.len())..]);
+        bytes
+    }
+
+    fn summary(&self, maximum_bytes: usize) -> String {
+        if self.total_bytes <= maximum_bytes as u64 && !self.exceeded_limit() {
+            let mut summary = String::from_utf8_lossy(&self.as_bytes()).into_owned();
+            let mut end = maximum_bytes.min(summary.len());
+            while !summary.is_char_boundary(end) {
+                end -= 1;
+            }
+            summary.truncate(end);
+            return summary;
+        }
+        let marker = format!(
+            "\n[Output bounded; {} bytes observed. Middle content may be omitted.]\n",
+            self.total_bytes
+        );
+        let room = maximum_bytes.saturating_sub(marker.len());
+        let head = room.min(self.prefix.len()).min(room / 2);
+        let tail = room.saturating_sub(head).min(self.suffix.len());
+        let start = self.suffix.len().saturating_sub(tail);
+        let mut summary = format!(
+            "{}{}{}",
+            String::from_utf8_lossy(&self.prefix[..head]),
+            marker,
+            String::from_utf8_lossy(&self.suffix[start..])
+        );
+        let mut end = maximum_bytes.min(summary.len());
+        while !summary.is_char_boundary(end) {
+            end -= 1;
+        }
+        summary.truncate(end);
+        summary
+    }
+}
+
+fn overflow_diagnostic(output: &BoundedOutput, errors: &BoundedOutput) -> String {
+    let stdout_budget = 14 * 1024;
+    let stderr_budget = 8 * 1024;
+    let mut message = String::from(
+        "The operation exceeded the 2 MiB output limit. It has finished; inspect the retained recovery records before retrying changes.",
+    );
+    if !output.is_empty() {
+        message.push_str(&format!(
+            "\n\nStandard output ({} bytes):\n{}",
+            output.total_bytes,
+            output.summary(stdout_budget)
+        ));
+    }
+    if !errors.is_empty() {
+        message.push_str(&format!(
+            "\n\nStandard error ({} bytes):\n{}",
+            errors.total_bytes,
+            errors.summary(stderr_budget)
+        ));
+    }
+    let mut message_end = OVERFLOW_DIAGNOSTIC_LIMIT.min(message.len());
+    while !message.is_char_boundary(message_end) {
+        message_end -= 1;
+    }
+    message.truncate(message_end);
+    message
+}
+
 fn base64(bytes: &[u8]) -> String {
     const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::new();
@@ -651,20 +771,37 @@ fn request(options: &Options, phase: &str, cancel: Option<&str>) -> Result<Strin
     }
     Ok(base64(&bytes))
 }
-fn drain(mut input: impl Read) -> Result<(Vec<u8>, bool), String> {
-    let mut output = Vec::new();
-    let mut overflow = false;
+fn drain(mut input: impl Read) -> Result<(BoundedOutput, bool), String> {
+    let mut output = BoundedOutput::default();
     let mut buffer = [0u8; 8192];
     loop {
         let n = input.read(&mut buffer).map_err(|e| e.to_string())?;
         if n == 0 {
             break;
         }
-        let keep = n.min(OUTPUT_LIMIT - output.len());
-        output.extend_from_slice(&buffer[..keep]);
-        overflow |= keep < n;
+        output.push(&buffer[..n]);
     }
+    let overflow = output.exceeded_limit();
     Ok((output, overflow))
+}
+
+fn retain_output_line(
+    line: &BoundedOutput,
+    output: &mut BoundedOutput,
+    sender: &mpsc::SyncSender<WorkerMessage>,
+) -> bool {
+    let bytes = line.as_bytes();
+    if line.prefix.starts_with(b"@@ICloudProgress:") {
+        if !line.exceeded_limit() {
+            if let Ok(value) = serde_json::from_slice(&bytes[17..]) {
+                let _ = sender.try_send(WorkerMessage::Progress(value));
+            }
+        }
+        return line.exceeded_limit();
+    }
+    output.push(&bytes);
+    output.push(b"\n");
+    line.exceeded_limit() || output.exceeded_limit()
 }
 
 fn native_records(
@@ -739,16 +876,16 @@ fn native_records(
         return Ok(None);
     }
     if overflow || error_overflow {
-        return Err("The Rust result exceeded the 2 MiB output limit.".into());
+        return Err(overflow_diagnostic(&output, &errors));
     }
     if !errors.is_empty() {
         return Err(format!(
             "The Rust backend wrote unexpected diagnostic output: {}",
-            String::from_utf8_lossy(&errors)
+            errors.summary(OVERFLOW_DIAGNOSTIC_LIMIT)
         ));
     }
-    let output =
-        String::from_utf8(output).map_err(|_| "The Rust backend returned invalid UTF-8.")?;
+    let output = String::from_utf8(output.as_bytes())
+        .map_err(|_| "The Rust backend returned invalid UTF-8.")?;
     let records: Vec<serde_json::Value> = output
         .lines()
         .filter(|line| !line.is_empty())
@@ -1666,10 +1803,10 @@ fn operation(
         });
     }
     if overflow || error_overflow {
-        return Err("The result exceeded the 2 MiB output limit. The operation has finished; inspect recovery records before retrying changes.".into());
+        return Err(overflow_diagnostic(&output, &errors));
     }
-    let output = String::from_utf8(output).map_err(|_| "Invalid UTF-8 result.")?;
-    let record=output.lines().filter_map(|line|line.strip_prefix("@@ICloudResult:")).next_back().ok_or_else(||format!("The operation ended without a complete result. Review recovery records before retrying. {}",String::from_utf8_lossy(&errors)))?;
+    let output = String::from_utf8(output.as_bytes()).map_err(|_| "Invalid UTF-8 result.")?;
+    let record=output.lines().filter_map(|line|line.strip_prefix("@@ICloudResult:")).next_back().ok_or_else(||format!("The operation ended without a complete result. Review recovery records before retrying. {}",errors.summary(8 * 1024)))?;
     let mut result: WorkerResult = serde_json::from_str(record).map_err(|e| e.to_string())?;
     if Some(result.exit_code) != exit.code() {
         return Err(
@@ -1677,7 +1814,9 @@ fn operation(
                 .into(),
         );
     }
-    result.text.push_str(&String::from_utf8_lossy(&errors));
+    result
+        .text
+        .push_str(&errors.summary(OVERFLOW_DIAGNOSTIC_LIMIT));
     Ok(result)
 }
 // Bound each record and retained output, but always drain both pipes. Progress
@@ -1685,9 +1824,9 @@ fn operation(
 fn read_output(
     mut input: impl Read,
     sender: mpsc::SyncSender<WorkerMessage>,
-) -> Result<(Vec<u8>, bool), String> {
-    let mut output = Vec::new();
-    let mut line = Vec::new();
+) -> Result<(BoundedOutput, bool), String> {
+    let mut output = BoundedOutput::default();
+    let mut line = BoundedOutput::default();
     let mut overflow = false;
     let mut buffer = [0u8; 8192];
     loop {
@@ -1695,35 +1834,24 @@ fn read_output(
         if n == 0 {
             break;
         }
-        for b in &buffer[..n] {
-            if *b == b'\n' {
-                if line.starts_with(b"@@ICloudProgress:") {
-                    if let Ok(value) = serde_json::from_slice(&line[17..]) {
-                        let _ = sender.try_send(WorkerMessage::Progress(value));
-                    }
-                } else {
-                    let keep = line.len().min(OUTPUT_LIMIT - output.len());
-                    output.extend_from_slice(&line[..keep]);
-                    overflow |= keep < line.len();
-                    if output.len() < OUTPUT_LIMIT {
-                        output.push(b'\n');
-                    } else {
-                        overflow = true;
-                    }
-                }
-                line.clear();
-            } else if line.len() < OUTPUT_LIMIT {
-                line.push(*b);
-            } else {
-                overflow = true;
+        let mut start = 0;
+        for (index, byte) in buffer[..n].iter().enumerate() {
+            if *byte == b'\n' {
+                line.push(&buffer[start..index]);
+                overflow |= retain_output_line(&line, &mut output, &sender);
+                line = BoundedOutput::default();
+                start = index + 1;
             }
+        }
+        if start < n {
+            line.push(&buffer[start..n]);
+            overflow |= line.exceeded_limit();
         }
     }
     if !line.is_empty() {
-        let keep = line.len().min(OUTPUT_LIMIT - output.len());
-        output.extend_from_slice(&line[..keep]);
-        overflow |= keep < line.len();
+        overflow |= retain_output_line(&line, &mut output, &sender);
     }
+    overflow |= output.exceeded_limit();
     Ok((output, overflow))
 }
 fn confirm(owner: HWND, options: &Options) -> Result<bool, String> {
@@ -4676,9 +4804,44 @@ mod tests {
     }
     #[test]
     fn output_is_bounded_but_drained() {
-        let (data, overflow) = drain(vec![b'x'; OUTPUT_LIMIT + 20000].as_slice()).unwrap();
-        assert_eq!(data.len(), OUTPUT_LIMIT);
+        let mut data = vec![b'x'; OUTPUT_LIMIT + 20000];
+        data.extend_from_slice(b"\nRecovery backup: C:\\fixture\\before.json");
+        let (captured, overflow) = drain(data.as_slice()).unwrap();
+        assert_eq!(captured.as_bytes().len(), OUTPUT_LIMIT);
+        assert_eq!(captured.total_bytes, data.len() as u64);
         assert!(overflow);
+        assert!(captured.summary(8192).contains("C:\\fixture\\before.json"));
+    }
+    #[test]
+    fn bounded_output_preserves_small_text_and_terminal_tail() {
+        let mut small = BoundedOutput::default();
+        small.push(b"short output");
+        assert_eq!(small.as_bytes(), b"short output");
+
+        let mut input = vec![b'x'; OUTPUT_LIMIT + 10000];
+        input.push(b'\n');
+        input.extend_from_slice(b"@@ICloudResult:{\"type\":\"result\",\"message\":\"done\"}\n");
+        let (sender, _receiver) = mpsc::sync_channel(1);
+        let (captured, overflow) = read_output(input.as_slice(), sender).unwrap();
+        let summary = captured.summary(8192);
+        assert!(overflow);
+        assert!(summary.contains("@@ICloudResult:"));
+        assert!(summary.contains("done"));
+        assert!(summary.len() <= 8192);
+    }
+    #[test]
+    fn overflow_diagnostic_keeps_stdout_and_recovery_tails_bounded() {
+        let mut output = BoundedOutput::default();
+        output.push(&vec![b'x'; OUTPUT_LIMIT + 100]);
+        output.push(b"\nTerminal result retained");
+        let mut errors = BoundedOutput::default();
+        errors.push(&vec![b'e'; OUTPUT_LIMIT + 100]);
+        errors.push(b"\nRecovery backup: C:\\fixture\\before.json");
+
+        let message = overflow_diagnostic(&output, &errors);
+        assert!(message.len() <= OVERFLOW_DIAGNOSTIC_LIMIT);
+        assert!(message.contains("Terminal result retained"));
+        assert!(message.contains("C:\\fixture\\before.json"));
     }
     #[test]
     fn generated_definitions_are_unique() {

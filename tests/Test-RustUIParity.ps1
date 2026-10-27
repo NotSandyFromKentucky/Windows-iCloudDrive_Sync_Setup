@@ -1,10 +1,15 @@
 #requires -Version 5.1
-param([Parameter(Mandatory)][string]$WorkerPath,[string]$BackendWorkerPath,[switch]$RunNativeIntegration)
+param([Parameter(Mandatory)][string]$WorkerPath,[string]$BackendWorkerPath,[switch]$RunNativeIntegration,[switch]$NoHiddenDesktop)
 $ErrorActionPreference='Stop'
 $repo=Split-Path $PSScriptRoot -Parent
 $WorkerPath=(Resolve-Path -LiteralPath $WorkerPath).Path
-if(-not $env:ICLOUD_TEST_DESKTOP){& (Join-Path $PSScriptRoot 'Invoke-HiddenDesktop.ps1') -ScriptPath $PSCommandPath -Parameters @{WorkerPath=$WorkerPath;BackendWorkerPath=$BackendWorkerPath;RunNativeIntegration=$RunNativeIntegration.IsPresent} -TimeoutSeconds 300;return}
-if(& (Join-Path $PSScriptRoot 'Enter-TestDesktop.ps1') -ScriptPath $PSCommandPath){return}
+if(-not $env:ICLOUD_TEST_DESKTOP -and -not $NoHiddenDesktop){& (Join-Path $PSScriptRoot 'Invoke-HiddenDesktop.ps1') -ScriptPath $PSCommandPath -Parameters @{WorkerPath=$WorkerPath;BackendWorkerPath=$BackendWorkerPath;RunNativeIntegration=$RunNativeIntegration.IsPresent} -TimeoutSeconds 300;return}
+if($NoHiddenDesktop){
+    $visibleEnvironment=& (Join-Path $PSScriptRoot 'Assert-IsolatedEnvironment.ps1')
+    if($visibleEnvironment -ne 'GitHubHosted'){throw 'NoHiddenDesktop UI automation is restricted to a GitHub-hosted runner.'}
+    if($env:ICLOUD_TEST_DESKTOP){throw 'NoHiddenDesktop mode must run on the visible runner desktop.'}
+    if(-not ('ICloudTestDesktop' -as [type])){Add-Type -Path (Join-Path $PSScriptRoot 'HiddenDesktop.cs')}
+}elseif(& (Join-Path $PSScriptRoot 'Enter-TestDesktop.ps1') -ScriptPath $PSCommandPath){return}
 if($RunNativeIntegration){$isolation=& (Join-Path $PSScriptRoot 'Assert-IsolatedEnvironment.ps1');if($isolation -notin @('GitHubHosted','WindowsSandbox')){throw 'Native UI integration tests require a disposable Windows environment.'}}
 Add-Type -AssemblyName System.Drawing,Accessibility
 Add-Type -AssemblyName UIAutomationClient,UIAutomationTypes
@@ -101,7 +106,7 @@ if($request.Action -eq 'Check iCloud configuration'){
     if(-not $request.Json){throw 'UI check must request structured JSON'}
     $body=@{Root=$request.Root;RootRegistered=$true;RootExists=$true;Healthy=$true;CloudSync='Not verified by this read-only check.';Errors=@();RegistryValues=@(@{Folder='Desktop';Current=$request.FolderPaths.Desktop;Matches=$true;DirectoryExists=$true});ResolvedFolders=@(@{Folder='Desktop';Current=$request.FolderPaths.Desktop;Matches=$true})}|ConvertTo-Json -Depth 6 -Compress
 }
-[Console]::Out.WriteLine(('@@ICloudResult:'+(@{ExitCode=$code;Message=$message;Text=$body}|ConvertTo-Json -Compress)))
+[Console]::Out.WriteLine(('@@ICloudResult:'+(@{Version=2;ExitCode=$code;Message=$message;Text=$body;TextTruncated=$false;CapturedCharacters=$body.Length}|ConvertTo-Json -Compress)))
 if($mode -eq 'mismatch'){exit 2};exit $code
 '@
 [IO.File]::WriteAllText((Join-Path $fixture 'tools/Invoke-WinUIBridge.ps1'),$stub)

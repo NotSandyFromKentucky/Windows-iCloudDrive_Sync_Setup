@@ -42,11 +42,11 @@ try{
     Copy-Item -LiteralPath (Join-Path $repo 'ICloudFolderSetup.UI.psm1') -Destination $fixture
     Copy-Item -LiteralPath (Join-Path $repo 'ICloudFolders.psm1') -Destination $fixture
     Copy-Item -LiteralPath (Join-Path $repo 'tools/Invoke-WinUIBridge.ps1') -Destination (Join-Path $fixture 'tools')
-    # Delay only the read-only metadata fixture to prove the window renders
-    # while startup work is pending and cannot execute an incomplete plan.
+    # Record the former metadata bridge request so startup can prove the
+    # generated resource avoids launching PowerShell just to load definitions.
     $bridgePath=Join-Path $fixture 'tools/Invoke-WinUIBridge.ps1'
-    $delay="if(`$request.Action -eq 'Get folder definitions'){ [IO.File]::WriteAllText((Join-Path `$root 'metadata-worker'),[string]`$PID); `$deadline=[DateTime]::UtcNow.AddSeconds(35); while(-not (Test-Path (Join-Path `$root 'release-metadata'))){if([DateTime]::UtcNow -gt `$deadline){throw 'Metadata fixture timed out'};Start-Sleep -Milliseconds 100};"
-    $bridgeText=[IO.File]::ReadAllText($bridgePath).Replace("if(`$request.Action -eq 'Get folder definitions'){",$delay)
+    $marker="if(`$request.Action -eq 'Get folder definitions'){[IO.File]::WriteAllText((Join-Path `$root 'metadata-worker'),[string]`$PID);"
+    $bridgeText=[IO.File]::ReadAllText($bridgePath).Replace("if(`$request.Action -eq 'Get folder definitions'){",$marker)
     [IO.File]::WriteAllText($bridgePath,$bridgeText)
     @'
 [CmdletBinding(SupportsShouldProcess)]
@@ -77,10 +77,10 @@ exit 0
     $window=[Windows.Automation.AutomationElement]::FromHandle([ICloudTestDesktop]::FindWindowForProcess($process.Id,'iCloud folder setup'))
     Write-Output ('Native window: '+$window.Current.Name+'; '+$window.Current.ClassName)
     Wait-For {$null -ne (Find-Control 'CloudRoot')} 'Native controls did not become available'
-    Assert (-not (Find-Control 'Preview').Current.IsEnabled) 'Preview enabled before delayed folder definitions loaded'
-    Assert (-not (Find-Control 'Apply').Current.IsEnabled) 'Apply enabled during startup'
-    Write-Output 'PASS: native window and automation respond during delayed startup; actions remain disabled'
-    [IO.File]::WriteAllText((Join-Path $fixture 'release-metadata'),'continue')
+    Wait-For {(Find-Control 'Preview').Current.IsEnabled} 'Generated folder definitions did not initialize the native UI'
+    Assert (-not (Find-Control 'Apply').Current.IsEnabled) 'Apply enabled before any preview'
+    Assert (-not(Test-Path (Join-Path $fixture 'metadata-worker'))) 'Native startup launched PowerShell to load folder definitions'
+    Write-Output 'PASS: generated folder metadata initializes the window without a PowerShell startup worker'
     Wait-For {Test-Path -LiteralPath $render} 'WinUI rendering fixture did not complete'
     $root=Find-Control 'CloudRoot';$preview=Find-Control 'Preview';$apply=Find-Control 'Apply'
     Assert (-not $apply.Current.IsEnabled) 'Apply enabled before any preview'
@@ -204,9 +204,35 @@ exit 0
     $null=[IO.Directory]::CreateDirectory($source)
     [IO.File]::WriteAllText((Join-Path $source 'a.txt'),'first')
     [IO.File]::WriteAllText((Join-Path $source 'b.txt'),'second')
+    $pageSource=Join-Path $fixture 'page-source';$null=[IO.Directory]::CreateDirectory($pageSource)
+    for($i=0;$i -lt 105;$i++){$null=[IO.Directory]::CreateDirectory((Join-Path $pageSource ('folder-{0:D3}' -f $i)))}
     (Find-Name 'Copy files').GetCurrentPattern([Windows.Automation.SelectionItemPattern]::Pattern).Select()
+    $rootControl=Find-Control 'CloudRoot'
+    $rootControl.GetCurrentPattern([Windows.Automation.ValuePattern]::Pattern).SetValue($pageSource)
     Invoke-Control $preview
     Wait-For {$apply.Current.IsEnabled} 'Copy preview did not finish'
+    $nextPage=Find-Control 'NextCopyPage';$previousPage=Find-Control 'PreviousCopyPage';$pageLabel=Find-Control 'CopyPageLabel'
+    Wait-For {$null -ne $nextPage -and $nextPage.Current.IsEnabled} 'Large copy preview did not expose its next page'
+    Assert ($pageLabel.Current.Name -like '*Rows 1*of 106*') 'First copy page did not report full-plan bounds'
+    $status=Find-Control 'OperationStatus'
+    $null=[IO.Directory]::CreateDirectory((Join-Path $pageSource 'late-folder'))
+    Invoke-Control $nextPage
+    Wait-For {$status.Current.Name -like '*Copy plan changed*'} 'Changed copy plan did not invalidate the paged review'
+    Assert (-not $apply.Current.IsEnabled -and $null -eq (Find-Control 'NextCopyPage')) 'Plan drift left stale copy rows, navigation or Apply approval visible'
+    Invoke-Control $preview
+    Wait-For {$apply.Current.IsEnabled} 'Copy preview did not rebuild after plan drift'
+    $nextPage=Find-Control 'NextCopyPage';$previousPage=Find-Control 'PreviousCopyPage';$pageLabel=Find-Control 'CopyPageLabel'
+    Wait-For {$nextPage.Current.IsEnabled} 'Rebuilt copy preview did not expose its remaining page'
+    Assert ($pageLabel.Current.Name -like '*Rows 1*of 107*') 'Rebuilt first page did not report the updated full-plan bounds'
+    Invoke-Control $nextPage
+    Wait-For {$pageLabel.Current.Name -like '*Rows 101*of 107*'} 'Next copy review page did not load'
+    Assert ($apply.Current.IsEnabled -and $previousPage.Current.IsEnabled -and -not $nextPage.Current.IsEnabled) 'Stable full-plan token did not preserve Apply across copy pages'
+    Invoke-Control $previousPage
+    Wait-For {$pageLabel.Current.Name -like '*Rows 1*of 106*'} 'Previous copy review page did not reload'
+    $rootControl.GetCurrentPattern([Windows.Automation.ValuePattern]::Pattern).SetValue($source)
+    Wait-For {-not $apply.Current.IsEnabled} 'Changing the copy source retained the paged review approval'
+    Invoke-Control $preview
+    Wait-For {$apply.Current.IsEnabled} 'Copy preview did not refresh after changing the source'
     Invoke-Control $apply
     Wait-For {$null -ne (Find-Name 'Cancel')} 'Copy confirmation did not open'
     $condition=New-Object Windows.Automation.AndCondition((New-Object Windows.Automation.PropertyCondition([Windows.Automation.AutomationElement]::NameProperty,'Copy files')),(New-Object Windows.Automation.PropertyCondition([Windows.Automation.AutomationElement]::ControlTypeProperty,[Windows.Automation.ControlType]::Button)))
@@ -243,23 +269,17 @@ Write-Output 'Installed application: isolated fixture'
     [ICloudTestDesktop]::CloseWindow([ICloudTestDesktop]::FindWindowForProcess($process.Id,'iCloud folder setup'))
     Assert ($process.WaitForExit(10000)) 'Ready window did not close'
     $process.Dispose()
-    Remove-Item -LiteralPath (Join-Path $fixture 'release-metadata')
-    Remove-Item -LiteralPath (Join-Path $fixture 'metadata-worker')
     $start.Arguments='--source "'+$fixture+'"'
     $process=[Diagnostics.Process]::Start($start)
     Wait-For {[ICloudTestDesktop]::FindWindowForProcess($process.Id,'iCloud folder setup') -ne [IntPtr]::Zero} 'Startup close fixture did not open'
     $handle=[ICloudTestDesktop]::FindWindowForProcess($process.Id,'iCloud folder setup')
     $window=[Windows.Automation.AutomationElement]::FromHandle($handle)
     Wait-For {$null -ne (Find-Control 'Preview')} 'Startup controls unavailable'
-    Assert (-not (Find-Control 'Preview').Current.IsEnabled) 'Startup close fixture was not waiting for metadata'
-    Wait-For {Test-Path (Join-Path $fixture 'metadata-worker')} 'Metadata worker did not enter fixture gate'
-    $metadataWorker=Get-Process -Id ([int][IO.File]::ReadAllText((Join-Path $fixture 'metadata-worker')))
+    Wait-For {(Find-Control 'Preview').Current.IsEnabled} 'Second native startup did not load generated definitions'
+    Assert (-not(Test-Path (Join-Path $fixture 'metadata-worker'))) 'Second startup launched PowerShell for definitions'
     [ICloudTestDesktop]::CloseWindow($handle)
-    Assert ($process.WaitForExit(10000) -and $process.ExitCode -eq 0) 'Read-only startup prevented closing'
-    [IO.File]::WriteAllText((Join-Path $fixture 'release-metadata'),'continue')
-    Assert ($metadataWorker.WaitForExit(10000)) 'Read-only metadata worker did not finish'
-    $metadataWorker.Dispose()
-    'PASS: read-only startup can close while metadata is pending'
+    Assert ($process.WaitForExit(10000) -and $process.ExitCode -eq 0) 'Native startup prevented closing'
+    'PASS: native startup does not launch a PowerShell metadata worker'
 }catch{
     Write-Output $_.ScriptStackTrace
     if($window){

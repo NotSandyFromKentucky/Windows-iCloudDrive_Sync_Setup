@@ -130,13 +130,55 @@ using System.Text;
 using System.Threading.Tasks;
 using System.Collections.Concurrent;
 namespace ICloudSetup {
+ public sealed class BoundedLineReader {
+  private const int SuffixLimit=16*1024; private readonly StreamReader reader; private readonly int maximum; private readonly char[] buffer=new char[4096]; private int offset; private int length;
+  public BoundedLineReader(StreamReader source,int maximumCharacters){reader=source;maximum=maximumCharacters;}
+  public async Task<string> ReadLineAsync(){
+   var value=new StringBuilder(Math.Min(maximum-SuffixLimit,4096));var suffix=new StringBuilder(SuffixLimit);long total=0;bool overflow=false;bool sawCharacter=false;
+   while(true){
+    if(offset>=length){length=await reader.ReadAsync(buffer,0,buffer.Length).ConfigureAwait(false);offset=0;if(length==0)return sawCharacter?Build(value,suffix,total,overflow):null;}
+    char character=buffer[offset++];if(character=='\n')return Build(value,suffix,total,overflow);sawCharacter=true;total++;
+    if(value.Length<maximum-SuffixLimit)value.Append(character);else{if(suffix.Length==SuffixLimit)suffix.Remove(0,1);suffix.Append(character);if(total>maximum)overflow=true;}
+   }
+  }
+  private static string Build(StringBuilder value,StringBuilder suffix,long total,bool overflow){
+   if(!overflow){if(suffix.Length>0&&suffix[suffix.Length-1]=='\r')suffix.Length--;else if(suffix.Length==0&&value.Length>0&&value[value.Length-1]=='\r')value.Length--;}
+   int overlap=(int)Math.Max(0,(long)value.Length+suffix.Length-total);string text=value.ToString();if(overlap<suffix.Length)text+=suffix.ToString(overlap,suffix.Length-overlap);
+   return overflow?text+"[line truncated; "+Math.Max(0,total-value.Length-suffix.Length)+" characters omitted]":text;
+  }
+ }
  public static class LiveOutput {
+  private const int PrefixLimit=48*1024; private const int SuffixLimit=16*1024; private const int ProgressQueueLimit=64; private const int ProgressLineLimit=32*1024;
   public static Task<string> Collect(StreamReader reader,ConcurrentQueue<string> lines) {
    return Task.Run(async () => {
-    var all=new StringBuilder(); string line;
-    while((line=await reader.ReadLineAsync())!=null){all.AppendLine(line);lines.Enqueue(line);}
-    return all.ToString();
+    var prefix=new StringBuilder(PrefixLimit); var suffix=new StringBuilder(SuffixLimit); long total=0; string line;var boundedReader=new BoundedLineReader(reader,64*1024);
+    while((line=await boundedReader.ReadLineAsync())!=null){
+     string item=line+Environment.NewLine; total+=item.Length; AppendBounded(prefix,suffix,item);
+     if(line.StartsWith("@@ICloudProgress:",StringComparison.Ordinal)){
+      if(line.Length>ProgressLineLimit)line="@@ICloudProgress:{\"Stage\":\"Progress detail bounded\",\"File\":\"\",\"Completed\":0,\"Total\":0}";
+      while(lines.Count>=ProgressQueueLimit){string discarded;lines.TryDequeue(out discarded);}
+      lines.Enqueue(line);
+     }
+    }
+    return FormatBounded(prefix,suffix,total);
    });
+  }
+  public static Task<string> CollectErrors(StreamReader reader) {
+   return Task.Run(async () => {
+    var prefix=new StringBuilder(PrefixLimit); var suffix=new StringBuilder(SuffixLimit); long total=0; var buffer=new char[4096]; int read;
+    while((read=await reader.ReadAsync(buffer,0,buffer.Length).ConfigureAwait(false))>0){total+=read;AppendBounded(prefix,suffix,buffer,read);}
+    return FormatBounded(prefix,suffix,total);
+   });
+  }
+  private static void AppendBounded(StringBuilder prefix,StringBuilder suffix,string value){AppendBounded(prefix,suffix,value.ToCharArray(),value.Length);}
+  private static void AppendBounded(StringBuilder prefix,StringBuilder suffix,char[] value,int count){
+   int take=Math.Min(count,PrefixLimit-prefix.Length);if(take>0)prefix.Append(value,0,take);
+   int tailStart=Math.Max(0,count-SuffixLimit);if(count>SuffixLimit){suffix.Clear();suffix.Append(value,tailStart,SuffixLimit);}else if(suffix.Length+count>SuffixLimit){int remove=suffix.Length+count-SuffixLimit;suffix.Remove(0,remove);suffix.Append(value,0,count);}else suffix.Append(value,0,count);
+  }
+  private static string FormatBounded(StringBuilder prefix,StringBuilder suffix,long total){
+   long retained=(long)prefix.Length+suffix.Length;int overlap=(int)Math.Max(0,retained-total);if(overlap>=suffix.Length)return prefix.ToString();
+   string marker=Environment.NewLine+"[Output bounded. Total captured characters: "+total+".]"+Environment.NewLine;
+   return prefix.ToString()+marker+suffix.ToString(overlap,suffix.Length-overlap);
   }
  }
 }
@@ -168,7 +210,7 @@ function Start-SetupWorker {
     $info.Arguments='-NoProfile -ExecutionPolicy Bypass -EncodedCommand '+[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
     $process=$null;try{$process=[Diagnostics.Process]::Start($info)}catch{if($cancelHandle){$cancelHandle.Dispose()};throw}
     $lines=New-Object 'Collections.Concurrent.ConcurrentQueue[string]'
-    [pscustomobject]@{Process=$process;Output=[ICloudSetup.LiveOutput]::Collect($process.StandardOutput,$lines);Error=$process.StandardError.ReadToEndAsync();Lines=$lines;CancelHandle=$cancelHandle}
+    [pscustomobject]@{Process=$process;Output=[ICloudSetup.LiveOutput]::Collect($process.StandardOutput,$lines);Error=[ICloudSetup.LiveOutput]::CollectErrors($process.StandardError);Lines=$lines;CancelHandle=$cancelHandle}
 }
 function New-SetupWindow {
     param([string]$Source,[string]$InitialAction='Set up iCloud folders',[scriptblock]$ConfirmAction={param($Owner,$Message,$Action) Confirm-SetupAction $Owner $Message $Action})

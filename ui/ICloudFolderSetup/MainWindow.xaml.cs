@@ -1,9 +1,12 @@
 using System.Diagnostics;
+using System.Text;
+using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.Windows.Storage.Pickers;
+using System.Text.Json;
 
 namespace ICloudFolderSetup;
 
@@ -13,13 +16,25 @@ public sealed partial class MainWindow : Window
     private bool initializing=true;
     internal bool IsClosed {get;private set;}
     private SetupOptions? reviewed;
+    private CopyReviewPage? copyPage;
+    private string? copyReviewToken;
+    private readonly List<int> copyPageOffsets=new();
     private string currentCategory="Locations";
     private string friendly="Your reviewed plan will appear here.", raw="";
     private readonly BackendClient backend;
+    private readonly object progressGate=new();
+    private readonly DispatcherQueueTimer progressTimer;
+    private CopyProgress? latestProgress;
+    private bool progressTimerActive, progressStartQueued;
     private readonly string[] arguments=Environment.GetCommandLineArgs();
+    private static readonly JsonSerializerOptions CopyPageJsonOptions=new(){WriteIndented=true};
     public MainWindow()
     {
         InitializeComponent();
+        progressTimer=DispatcherQueue.CreateTimer();
+        progressTimer.Interval=TimeSpan.FromMilliseconds(100);
+        progressTimer.IsRepeating=true;
+        progressTimer.Tick+=(_,_)=>DrainProgress();
         Root.SizeChanged+=(_,_)=>RefreshCommandLayout();
         backend=new BackendClient(FindSource());
         AppWindow.Resize(new Windows.Graphics.SizeInt32(1060,860));
@@ -94,7 +109,36 @@ public sealed partial class MainWindow : Window
         if(Microsoft.UI.Xaml.Automation.Peers.FrameworkElementAutomationPeer.FromElement(Status) is {} peer)
             peer.RaiseAutomationEvent(Microsoft.UI.Xaml.Automation.Peers.AutomationEvents.LiveRegionChanged);
     }
-    private void RenderResult() => Results.Text=Technical.IsChecked==true ? raw : friendly;
+    private void RenderResult()
+    {
+        if(copyPage is not null){Results.Text=Technical.IsChecked==true ? JsonSerializer.Serialize(copyPage,CopyPageJsonOptions) : FormatCopyPage(copyPage);return;}
+        Results.Text=Technical.IsChecked==true ? raw : friendly;
+    }
+    private static string FormatCopyPage(CopyReviewPage page)
+    {
+        var text=new StringBuilder();
+        text.AppendLine($"Copy review · {page.TotalEntries} total entries");
+        if(page.Entries.Length==0) text.AppendLine("No files or folders need to be copied.");
+        foreach(var entry in page.Entries){
+            text.Append(entry.Action).Append(" ").AppendLine(entry.Directory ? "folder" : "file");
+            text.Append("Source: ").AppendLine(entry.Source);
+            text.Append("Destination: ").AppendLine(entry.Destination);
+            text.AppendLine();
+        }
+        return text.ToString();
+    }
+    private void UpdateCopyPageNavigation()
+    {
+        CopyPageNavigation.Visibility=copyPage is null ? Visibility.Collapsed : Visibility.Visible;
+        Save.Content=copyPage is null ? "Save result…" : "Save current page…";
+        if(copyPage is null){CopyPageLabel.Text="";PreviousCopyPage.IsEnabled=false;NextCopyPage.IsEnabled=false;return;}
+        int first=copyPage.TotalEntries==0 ? 0 : copyPage.Offset+1;
+        int last=copyPage.Offset+copyPage.Entries.Length;
+        CopyPageLabel.Text=copyPage.TotalEntries==0 ? "Empty plan" : $"Rows {first}–{last} of {copyPage.TotalEntries}";
+        AutomationProperties.SetName(CopyPageLabel,CopyPageLabel.Text);
+        PreviousCopyPage.IsEnabled=!busy && copyPageOffsets.Count>0;
+        NextCopyPage.IsEnabled=!busy && copyPage.NextOffset is not null;
+    }
     private void ShowCategory(string category)
     {
         currentCategory=category;
@@ -156,6 +200,7 @@ public sealed partial class MainWindow : Window
     private void InvalidateReview()
     {
         reviewed=null;Apply.IsEnabled=false;
+        copyPage=null;copyReviewToken=null;copyPageOffsets.Clear();UpdateCopyPageNavigation();
         friendly="Options changed. Preview again before applying.";raw="";RenderResult();
         SetStatus("Ready to preview","Review the plan before making changes.");
     }
@@ -183,7 +228,7 @@ public sealed partial class MainWindow : Window
     private async void SaveResult(object sender,RoutedEventArgs args)
     {
         try {
-            var picker=new FileSavePicker(AppWindow.Id){Title="Save folder setup result",SuggestedFileName="folder-setup-result",DefaultFileExtension=".txt",ShowOverwritePrompt=true};picker.FileTypeChoices.Add("Text",new[]{".txt"});
+            var picker=new FileSavePicker(AppWindow.Id){Title=copyPage is null ? "Save folder setup result" : "Save copy review page",SuggestedFileName=copyPage is null ? "folder-setup-result" : $"copy-review-page-{copyPage.Offset+1}",DefaultFileExtension=".txt",ShowOverwritePrompt=true};picker.FileTypeChoices.Add("Text",new[]{".txt"});
             if(await picker.PickSaveFileAsync() is {} file){await File.WriteAllTextAsync(file.Path,Results.Text);SetStatus("Result saved",file.Path,InfoBarSeverity.Success);}
         }catch(Exception error){ShowError(error);}
     }
@@ -197,18 +242,50 @@ public sealed partial class MainWindow : Window
         Stop.Visibility=value && options.IsCopy ? Visibility.Visible : Visibility.Collapsed;Stop.IsEnabled=value;
         Progress.Visibility=value ? Visibility.Visible : Visibility.Collapsed;
         if(value){Progress.IsIndeterminate=true;Progress.Value=0;CurrentFile.Text="";CurrentFile.Visibility=Visibility.Collapsed;}
+        UpdateCopyPageNavigation();
+    }
+    private void QueueProgress(CopyProgress item)
+    {
+        bool queueStart=false;
+        lock(progressGate){
+            latestProgress=item;
+            if(!progressTimerActive && !progressStartQueued){progressStartQueued=true;queueStart=true;}
+        }
+        if(queueStart && !DispatcherQueue.TryEnqueue(StartProgressTimer))
+            lock(progressGate) progressStartQueued=false;
+    }
+    private void StartProgressTimer()
+    {
+        lock(progressGate){
+            progressStartQueued=false;
+            if(!busy){latestProgress=null;return;}
+            progressTimerActive=true;
+        }
+        progressTimer.Start();
+    }
+    private void DrainProgress()
+    {
+        CopyProgress? item;
+        lock(progressGate){item=latestProgress;latestProgress=null;}
+        if(item is null || !busy)return;
+        CurrentFile.Visibility=Visibility.Visible;CurrentFile.Text=item.File;
+        if(item.Total>0){Progress.IsIndeterminate=false;Progress.Maximum=item.Total;Progress.Value=Math.Clamp(item.Completed,0,item.Total);}
+        if(!stopRequested) SetStatus(item.Stage,item.Total>0 ? $"{item.Completed} of {item.Total} files verified" : "Reading the copy plan. Large files and cloud downloads may take time.");
     }
     private static void SetInteraction(UIElement element,bool enabled)
     {
         if(element is Control control) control.IsEnabled=enabled;
         else if(element is Panel panel) foreach(var child in panel.Children) SetInteraction(child,enabled);
     }
-    private async Task RunAsync(string phase)
+    private async Task RunAsync(string phase,int? requestedCopyOffset=null)
     {
         if(busy || confirming) return;
         var options=Snapshot();
+        bool pageNavigation=options.IsCopy && phase=="Preview" && requestedCopyOffset is not null && copyReviewToken is not null;
+        string? previousToken=copyReviewToken;
         if(phase=="Apply") {
             if(reviewed!=options){SetStatus("Preview required","Options changed. Preview this plan again.",InfoBarSeverity.Warning);return;}
+            if(options.IsCopy && string.IsNullOrEmpty(copyReviewToken)){SetStatus("Copy review required","Preview the complete copy plan before applying it.",InfoBarSeverity.Warning);return;}
             string consequence=options.IsCopy ? "Copy the reviewed files without overwriting existing content. Originals remain in place. Cloud files may download and destination copies may synchronize. Folder locations will not change."
                 : options.Action=="Clean up cloud test file" ? "Remove the exact verification files shown in the plan. This deletion will synchronize to iCloud and other devices."
                 : options.Action=="Create cloud test file" ? "Create the small verification file in your iCloud Documents folder."
@@ -220,27 +297,64 @@ public sealed partial class MainWindow : Window
             if(answer!=ContentDialogResult.Primary) return;
             if(busy || Snapshot()!=options || reviewed!=options) return;
         }
-        reviewed=null;stopRequested=false;SetBusy(true,options);
+        if(!pageNavigation){reviewed=null;if(options.IsCopy && phase!="Apply"){copyPage=null;copyReviewToken=null;copyPageOffsets.Clear();UpdateCopyPageNavigation();}}
+        stopRequested=false;SetBusy(true,options);
         Status.StartBringIntoView(new BringIntoViewOptions{AnimationDesired=false});
         SetStatus("Working",options.IsCopy ? "Copying can stop after the current file has been verified." : "Wait for the operation to finish. Folder changes cannot be interrupted.");
         try {
-            var result=await backend.RunAsync(options,phase,item=>DispatcherQueue.TryEnqueue(()=> {
-                if(!busy) return;
-                CurrentFile.Visibility=Visibility.Visible;CurrentFile.Text=item.File;
-                if(item.Total>0){Progress.IsIndeterminate=false;Progress.Maximum=item.Total;Progress.Value=Math.Clamp(item.Completed,0,item.Total);}
-                if(!stopRequested) SetStatus(item.Stage,item.Total>0 ? $"{item.Completed} of {item.Total} files verified" : "Reading the copy plan. Large files and cloud downloads may take time.");
-            }));
-            raw=result.Text+Environment.NewLine+"Exit code: "+result.ExitCode;
-            friendly=result.Message+Environment.NewLine+result.Text;RenderResult();
+            var result=await backend.RunAsync(options,phase,QueueProgress,requestedCopyOffset ?? 0,phase=="Apply" ? copyReviewToken : null);
+            if(options.IsCopy && phase!="Apply"){
+                var page=result.CopyPage ?? throw new InvalidDataException("The copy review page is missing.");
+                if(pageNavigation && !StringComparer.Ordinal.Equals(previousToken,page.ApprovalToken)){
+                    reviewed=null;copyPage=null;copyReviewToken=null;copyPageOffsets.Clear();UpdateCopyPageNavigation();
+                    raw="";friendly="The copy plan changed while loading this page. Preview the complete plan again.";RenderResult();
+                    SetStatus("Copy plan changed",friendly,InfoBarSeverity.Warning);
+                    return;
+                }
+                if(!pageNavigation) copyPageOffsets.Clear();
+                copyPage=page;copyReviewToken=page.ApprovalToken;
+                raw=friendly="";UpdateCopyPageNavigation();
+            }else{
+                if(options.IsCopy){copyPage=null;copyReviewToken=null;copyPageOffsets.Clear();UpdateCopyPageNavigation();}
+                var output=result.Text+Environment.NewLine+"Exit code: "+result.ExitCode;
+                raw=output;
+                friendly=options.IsCopy && phase!="Apply" ? output : result.Message+Environment.NewLine+result.Text;
+            }
+            RenderResult();
             SetStatus(result.ExitCode==0 ? phase=="Apply" ? "Action completed" : "Review the result" : result.ExitCode==3 ? "Copy stopped safely" : "Action needs attention",result.Message,result.ExitCode==0 ? InfoBarSeverity.Success : result.ExitCode is 2 or 3 ? InfoBarSeverity.Warning : InfoBarSeverity.Error);
+            if(result.ExitCode!=0)reviewed=null;
             if(result.ExitCode==0 && phase!="Apply" && options.Mutates) reviewed=options;
-        }catch(Exception error){ShowError(error);}
-        finally{SetBusy(false,options);Apply.IsEnabled=reviewed==Snapshot();Preview.Focus(FocusState.Programmatic);}
+        }catch(Exception error){
+            if(options.IsCopy){reviewed=null;copyPage=null;copyReviewToken=null;copyPageOffsets.Clear();UpdateCopyPageNavigation();Apply.IsEnabled=false;}
+            ShowError(error);
+        }
+        finally{
+            progressTimer.Stop();
+            lock(progressGate){progressTimerActive=false;progressStartQueued=false;latestProgress=null;}
+            SetBusy(false,options);Apply.IsEnabled=reviewed==Snapshot();
+            if(requestedCopyOffset is null) Preview.Focus(FocusState.Programmatic);
+        }
     }
-    private async Task RunSafelyAsync(string phase){try{await RunAsync(phase);}catch(Exception error){ShowError(error);}}
+    private async Task RunSafelyAsync(string phase,int? copyOffset=null){try{await RunAsync(phase,copyOffset);}catch(Exception error){ShowError(error);}}
+    private async Task ChangeCopyPageAsync(bool next)
+    {
+        if(busy || copyPage is null)return;
+        if(next && copyPage.NextOffset is int nextOffset){
+            int current=copyPage.Offset;string? token=copyReviewToken;
+            await RunSafelyAsync("Preview",nextOffset);
+            if(copyPage?.Offset==nextOffset && StringComparer.Ordinal.Equals(copyReviewToken,token))copyPageOffsets.Add(current);
+        }else if(!next && copyPageOffsets.Count>0){
+            int previous=copyPageOffsets[^1];string? token=copyReviewToken;
+            await RunSafelyAsync("Preview",previous);
+            if(copyPage?.Offset==previous && StringComparer.Ordinal.Equals(copyReviewToken,token))copyPageOffsets.RemoveAt(copyPageOffsets.Count-1);
+        }
+        UpdateCopyPageNavigation();
+    }
     private async void PreviewClick(object sender,RoutedEventArgs args) => await RunSafelyAsync("Preview");
     private async void DryRunClick(object sender,RoutedEventArgs args) => await RunSafelyAsync("DryRun");
     private async void ApplyClick(object sender,RoutedEventArgs args) => await RunSafelyAsync("Apply");
+    private async void PreviousCopyPageClick(object sender,RoutedEventArgs args) => await ChangeCopyPageAsync(false);
+    private async void NextCopyPageClick(object sender,RoutedEventArgs args) => await ChangeCopyPageAsync(true);
     private void StopClick(object sender,RoutedEventArgs args)
     {
         if(backend.RequestStop()){stopRequested=true;Stop.IsEnabled=false;SetStatus("Stop requested","Finishing the current file and verification. Large files or cloud downloads can delay stopping.",InfoBarSeverity.Warning);}

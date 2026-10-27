@@ -13,19 +13,31 @@ function Read-ReleaseInputs {
         if($inputData.SchemaVersion -ne 2){throw 'Unsupported release input schema.'}
         $files=@($inputData.Files);$native=$inputData.NativeUI
     }
-    $all=@($files)
+    $all=New-Object 'Collections.Generic.List[string]'
+    $seen=New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    $runtimeSeen=New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    foreach($file in $files){
+        if($file -isnot [string] -or $file -notmatch '^[A-Za-z0-9_./-]+$' -or $file -match '(^|/)\.\.?(/|$)' -or [IO.Path]::IsPathRooted($file) -or -not $runtimeSeen.Add($file) -or -not $seen.Add($file)){throw 'Unsafe or duplicate release input path.'}
+        $all.Add($file)
+    }
     if($null -ne $native){
         if($native.DefaultRuntimeIdentifier -notin @('win-x64','win-arm64') -or $native.Project -notlike 'ui/*.csproj' -or $native.SourceFiles -notcontains $native.Project -or $native.SourceFiles -notcontains 'global.json' -or $native.SourceFiles -notcontains 'ui/ICloudFolderSetup/packages.lock.json'){throw 'Invalid native release inputs.'}
-        $all+=@($native.SourceFiles)
+        $nativeSeen=New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+        foreach($file in $native.SourceFiles){
+            if($file -isnot [string] -or $file -notmatch '^[A-Za-z0-9_./-]+$' -or $file -match '(^|/)\.\.?(/|$)' -or [IO.Path]::IsPathRooted($file) -or -not $nativeSeen.Add($file)){throw 'Unsafe or duplicate release input path.'}
+            if($seen.Contains($file)){
+                # One exact path may serve as both shipped runtime and build source.
+                if($files -cnotcontains $file){throw 'Unsafe or duplicate release input path.'}
+            }else{
+                $seen.Add($file)|Out-Null
+                $all.Add($file)
+            }
+        }
         if($native.MaximumFiles -lt 1 -or $native.MaximumFiles -gt 4096 -or $native.MaximumExpandedBytes -lt 1 -or $native.MaximumExpandedBytes -gt 1GB){throw 'Invalid native package limits.'}
         foreach($file in $native.RequiredFiles){if($file -notmatch '^[A-Za-z0-9_.-]+$' -or $file -match '^\.') {throw 'Unsafe required native filename.'}}
     }
-    $seen=New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
-    foreach($file in $all){
-        if($file -isnot [string] -or $file -notmatch '^[A-Za-z0-9_./-]+$' -or $file -match '(^|/)\.\.?(/|$)' -or [IO.Path]::IsPathRooted($file) -or -not $seen.Add($file)){throw 'Unsafe or duplicate release input path.'}
-    }
     if(-not $files.Count){throw 'Empty release file list.'}
-    [pscustomobject]@{Files=$files;NativeUI=$native;SourceFiles=$all}
+    [pscustomobject]@{Files=$files;NativeUI=$native;SourceFiles=$all.ToArray()}
 }
 function Assert-NativePayload {
     param([Parameter(Mandatory)][string]$Directory,[Parameter(Mandatory)]$Policy,[Parameter(Mandatory)][ValidateSet('win-x64','win-arm64')][string]$RuntimeIdentifier)

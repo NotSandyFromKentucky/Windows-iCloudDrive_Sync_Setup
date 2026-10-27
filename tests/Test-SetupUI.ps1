@@ -150,9 +150,10 @@ try{
     'PASS: packaged manifest installation and tampered-file rejection before writes'
     Expect-Failure {Install-SetupFiles -Source $repo -InstallRoot (Join-Path $fixture 'incomplete-native') -ProgramsDirectory (Join-Path $fixture 'native-menu') -RequireNative}
     Assert (-not(Test-Path (Join-Path $fixture 'incomplete-native'))) 'Incomplete native package created an installation directory'
-    $nativeFiles=@((@($entries.Path)+@('NativeUI/ICloudFolderSetup.exe','tools/Invoke-WinUIBridge.ps1','tools/Invoke-WinUIInstall.ps1')) | Select-Object -Unique)
+    $nativeFiles=@((@($entries.Path)+@('NativeUI/ICloudFolderSetup.exe','NativeUI/folder-definitions.json','tools/Invoke-WinUIBridge.ps1','tools/Invoke-WinUIInstall.ps1')) | Select-Object -Unique)
     $null=[IO.Directory]::CreateDirectory((Join-Path $package 'NativeUI'))
     [IO.File]::WriteAllText((Join-Path $package 'NativeUI/ICloudFolderSetup.exe'),'Fixture only; never execute')
+    [IO.File]::WriteAllText((Join-Path $package 'NativeUI/folder-definitions.json'),'[{"Id":"Desktop","RelativePath":"Desktop"}]',[Text.UTF8Encoding]::new($false))
     foreach($bridge in @('Invoke-WinUIBridge.ps1','Invoke-WinUIInstall.ps1')){Copy-Item -LiteralPath (Join-Path $repo ('tools/'+$bridge)) -Destination (Join-Path $package 'tools')}
     $nativeEntries=@($nativeFiles | ForEach-Object {[pscustomobject]@{Path=$_;SHA256=(Get-FileHash -LiteralPath (Join-Path $package $_)).Hash}})
     [pscustomobject]@{Files=$nativeEntries} | ConvertTo-Json -Depth 5 | Set-Content (Join-Path $package 'manifest.json')

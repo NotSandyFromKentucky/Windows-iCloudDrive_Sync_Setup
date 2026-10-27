@@ -265,6 +265,38 @@ function Assert-DirectoryPath {
     }
 }
 
+function Read-BoundedBackup {
+    param([Parameter(Mandatory)][string]$Path)
+    $stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    try {
+        if ($stream.Length -gt 1MB) { throw 'Recovery backup exceeds the supported 1 MiB size limit.' }
+        $reader = [IO.StreamReader]::new($stream, [Text.Encoding]::UTF8, $true)
+        try { $json = $reader.ReadToEnd() } finally { $reader.Dispose() }
+    } finally { $stream.Dispose() }
+    $depth = 0
+    $inString = $false
+    $escaped = $false
+    for ($index = 0; $index -lt $json.Length; $index++) {
+        $character = $json[$index]
+        if ($inString) {
+            if ($escaped) { $escaped = $false; continue }
+            if ($character -eq '\') { $escaped = $true; continue }
+            if ($character -eq '"') { $inString = $false }
+            continue
+        }
+        if ($character -eq '"') { $inString = $true; continue }
+        if ($character -eq '{' -or $character -eq '[') {
+            $depth++
+            if ($depth -gt 8) { throw 'Recovery backup exceeds the supported 8-level nesting limit.' }
+        } elseif ($character -eq '}' -or $character -eq ']') {
+            $depth--
+            if ($depth -lt 0) { throw 'Recovery backup has invalid nesting.' }
+        }
+    }
+    if ($inString -or $depth -ne 0) { throw 'Recovery backup has invalid nesting.' }
+    ConvertFrom-Json -InputObject $json
+}
+
 function Test-DestinationAccess {
     param([string[]]$Paths)
     foreach ($path in $Paths) {
@@ -284,13 +316,16 @@ function Assert-Backup {
     }
     $allowed = Get-FolderMap -IncludeMusic
     $seen = @{}
-    if (@($Backup.Values).Count -eq 0) { throw 'Backup has no values.' }
-    foreach ($v in $Backup.Values) {
+    $backupValues = @($Backup.Values)
+    if ($backupValues.Count -eq 0) { throw 'Backup has no values.' }
+    if ($backupValues.Count -gt $allowed.Count) { throw 'Backup contains too many registry values.' }
+    foreach ($v in $backupValues) {
         if (-not $allowed.Contains($v.Name) -or $seen.ContainsKey($v.Name)) { throw "Unexpected or duplicate backup value: $($v.Name)" }
         $seen[$v.Name] = $true
         if ($v.Exists -isnot [bool]) { throw 'Invalid existence flag in backup.' }
         if ($v.Exists) {
             if ($v.Kind -notin @('String','ExpandString') -or $v.Data -isnot [string]) { throw 'Invalid registry value in backup.' }
+            if ($v.Data.Length -gt 32767) { throw 'Registry path in backup exceeds the supported length.' }
             $null = Get-NormalPath $v.Data
         } elseif ($null -ne $v.Kind -or $null -ne $v.Data) { throw 'Invalid absent value in backup.' }
     }
@@ -319,7 +354,7 @@ function Invoke-ICloudFolders {
         $contentWarnings = @()
         $registeredRoots = @()
         if ($RestoreBackup) {
-            $backup = Get-Content -LiteralPath $RestoreBackup -Raw | ConvertFrom-Json
+            $backup = Read-BoundedBackup -Path $RestoreBackup
             Assert-Backup $backup
             $desired = @($backup.Values)
             foreach ($v in $desired) {
@@ -386,7 +421,7 @@ function Invoke-ICloudFolders {
         $log = Join-Path $run 'operation.log'
         $record = [pscustomobject]@{ Version=1; Sid=(Get-UserSid); Key=$script:ShellKey; CreatedUtc=[DateTime]::UtcNow.ToString('o'); Values=@($before) }
         $record | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $backupPath -Encoding UTF8
-        $saved = Get-Content -LiteralPath $backupPath -Raw | ConvertFrom-Json
+        $saved = Read-BoundedBackup -Path $backupPath
         Assert-Backup $saved
         if (($saved.Values | ConvertTo-Json -Depth 6 -Compress) -cne ($before | ConvertTo-Json -Depth 6 -Compress)) {
             throw "Backup round-trip mismatch: $backupPath"

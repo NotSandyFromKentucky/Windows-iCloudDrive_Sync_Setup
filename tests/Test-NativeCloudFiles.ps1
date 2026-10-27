@@ -1,14 +1,18 @@
 #requires -Version 5.1
 [CmdletBinding()]
-param([Parameter(Mandatory)][string]$Snapshot)
+param([Parameter(Mandatory)][string]$Snapshot,[switch]$NoHiddenDesktop)
 $ErrorActionPreference='Stop'
 
-if(-not $env:ICLOUD_TEST_DESKTOP){
+if(-not $env:ICLOUD_TEST_DESKTOP -and -not $NoHiddenDesktop){
     & (Join-Path $PSScriptRoot 'Invoke-HiddenDesktop.ps1') -ScriptPath $PSCommandPath -Parameters @{Snapshot=$Snapshot} -TimeoutSeconds 600
     return
 }
 
 $isolation=& (Join-Path $PSScriptRoot 'Assert-IsolatedEnvironment.ps1')
+if($NoHiddenDesktop){
+    if($isolation -ne 'GitHubHosted'){throw 'NoHiddenDesktop provider integration is restricted to a GitHub-hosted runner.'}
+    if($env:ICLOUD_TEST_DESKTOP){throw 'NoHiddenDesktop mode must run on the visible runner desktop.'}
+}
 if($isolation -notin @('GitHubHosted','WindowsSandbox')){throw 'Cloud Files provider integration requires a disposable Windows environment.'}
 
 $snapshotPath=[IO.Path]::GetFullPath($Snapshot)

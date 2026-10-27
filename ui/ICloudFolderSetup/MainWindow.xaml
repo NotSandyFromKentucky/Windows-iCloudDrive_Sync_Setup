@@ -74,6 +74,11 @@
       <TextBlock x:Name="CurrentFile" TextWrapping="Wrap" Visibility="Collapsed" IsTextSelectionEnabled="True" />
       <StackPanel Spacing="8">
        <TextBlock Text="Plan and results" Style="{StaticResource SubtitleTextBlockStyle}" />
+       <StackPanel x:Name="CopyPageNavigation" Orientation="Horizontal" Spacing="8" Visibility="Collapsed">
+        <Button x:Name="PreviousCopyPage" Content="Previous page" Click="PreviousCopyPageClick" IsEnabled="False" AutomationProperties.Name="Previous copy review page" AutomationProperties.AutomationId="PreviousCopyPage" />
+        <TextBlock x:Name="CopyPageLabel" Text="" VerticalAlignment="Center" AutomationProperties.LiveSetting="Polite" AutomationProperties.AutomationId="CopyPageLabel" />
+        <Button x:Name="NextCopyPage" Content="Next page" Click="NextCopyPageClick" IsEnabled="False" AutomationProperties.Name="Next copy review page" AutomationProperties.AutomationId="NextCopyPage" />
+       </StackPanel>
        <TextBox x:Name="Results" Text="Your reviewed plan will appear here." IsReadOnly="True" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="180" AutomationProperties.Name="Plan and results" AutomationProperties.AutomationId="Results" />
        <StackPanel Orientation="Horizontal" Spacing="12">
         <CheckBox x:Name="Technical" Content="Technical details" Checked="TechnicalChanged" Unchecked="TechnicalChanged" />

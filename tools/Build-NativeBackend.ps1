@@ -52,7 +52,7 @@ $before=@{}
 foreach($name in @('ICLOUD_FOLDER_MAP_PATH','CARGO_TARGET_DIR','RUSTFLAGS','CARGO_ENCODED_RUSTFLAGS','LIB','PATH')){$before[$name]=[Environment]::GetEnvironmentVariable($name,'Process')}
 try{
     if($Project -eq 'RustUI'){
-        $manifestTool=Get-Command mt.exe -CommandType Application -ErrorAction SilentlyContinue
+        $manifestTool=Get-Command mt.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
         if(-not $manifestTool){
             $arch=if($env:PROCESSOR_ARCHITECTURE -eq 'ARM64'){'arm64'}else{'x64'}
             $patterns=@((Join-Path ${env:ProgramFiles(x86)} ('Windows Kits/10/bin/*/'+$arch+'/mt.exe')),(Join-Path $env:USERPROFILE ('.nuget/packages/microsoft.windows.sdk.buildtools/*/bin/*/'+$arch+'/mt.exe')))
@@ -88,7 +88,7 @@ try{
         $env:LIB=($LinkerLibraryDirectories -join ';')+';'+$before.LIB
     }
     $manifest=Join-Path $output 'Cargo.toml'
-    $cargo=(Get-Command cargo -CommandType Application -ErrorAction Stop).Source
+    $cargo=(Get-Command cargo -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
     $commands=@('build');if($Test){$commands=@('test','build')}
     foreach($command in $commands){
         $stdout=Join-Path $output ($command+'.stdout.txt');$stderr=Join-Path $output ($command+'.stderr.txt')

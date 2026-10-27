@@ -22,6 +22,20 @@
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.5.1" />
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.26100.9169" />
   </ItemGroup>
+  <Target Name="GenerateCentralFolderDefinitions" BeforeTargets="PrepareForBuild">
+    <PropertyGroup>
+      <FolderDefinitionsOutput>$(MSBuildProjectDirectory)\$(IntermediateOutputPath)folder-definitions.json</FolderDefinitionsOutput>
+      <FolderDefinitionsGenerator>$(MSBuildProjectDirectory)\..\..\tools\Generate-FolderDefinitions.ps1</FolderDefinitionsGenerator>
+    </PropertyGroup>
+    <MakeDir Directories="$([System.IO.Path]::GetDirectoryName('$(FolderDefinitionsOutput)'))" />
+    <Exec Command="powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;$(FolderDefinitionsGenerator)&quot; -OutputPath &quot;$(FolderDefinitionsOutput)&quot;" />
+    <ItemGroup>
+      <Content Include="$(FolderDefinitionsOutput)" Link="folder-definitions.json">
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+        <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      </Content>
+    </ItemGroup>
+  </Target>
   <!-- Unpackaged MRT Core builds currently omit the app PRI from publish items.
        Keep the generated resource index in the same immutable publish output.
        https://github.com/microsoft/WindowsAppSDK/issues/6720 -->
