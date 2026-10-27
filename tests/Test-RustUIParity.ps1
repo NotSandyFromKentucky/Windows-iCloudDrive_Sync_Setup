@@ -48,6 +48,7 @@ function Confirm([bool]$Approve){
     }
 }
 function Start-UIWithEnvironment([string]$Arguments,[hashtable]$Environment){
+    if($NoHiddenDesktop){$Environment['ICLOUD_UI_FIXTURE_MODE']='1'}
     $names=@($Environment.Keys)
     $previous=@{}
     foreach($name in $names){$previous[$name]=[Environment]::GetEnvironmentVariable($name,'Process')}

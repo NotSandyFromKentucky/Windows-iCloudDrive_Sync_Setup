@@ -4346,14 +4346,20 @@ fn run() -> Result<(), String> {
                 mode = &pair[1]
             }
             "--source" => explicit_source = Some(PathBuf::from(&pair[1])),
-            "--fixture-dpi" if std::env::var("ICLOUD_TEST_DESKTOP").is_ok() => {
+            "--fixture-dpi"
+                if std::env::var("ICLOUD_TEST_DESKTOP").is_ok()
+                    || std::env::var("ICLOUD_UI_FIXTURE_MODE").is_ok() =>
+            {
                 let dpi = pair[1].parse::<u32>().map_err(|e| e.to_string())?;
                 if ![96, 144, 192].contains(&dpi) {
                     return Err("Unsupported fixture DPI.".into());
                 }
                 fixture_dpi = Some(dpi);
             }
-            "--fixture-theme" if std::env::var("ICLOUD_TEST_DESKTOP").is_ok() => {
+            "--fixture-theme"
+                if std::env::var("ICLOUD_TEST_DESKTOP").is_ok()
+                    || std::env::var("ICLOUD_UI_FIXTURE_MODE").is_ok() =>
+            {
                 fixture_dark = Some(match pair[1].as_str() {
                     "dark" => true,
                     "light" => false,

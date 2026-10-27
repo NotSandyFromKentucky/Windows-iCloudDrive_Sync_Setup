@@ -104,7 +104,10 @@ try{
             [IO.File]::WriteAllText($stdout,$out.Result);[IO.File]::WriteAllText($stderr,$err.Result)
             $out.Result | Out-Host
             $err.Result | Out-Host
-            if($process.ExitCode -ne 0){throw ('Native backend '+$command+' failed.')}
+            if($process.ExitCode -ne 0){
+                $details=(@(($err.Result -split '\r?\n')+($out.Result -split '\r?\n')|Where-Object {$_}|Select-Object -Last 30) -join [Environment]::NewLine)
+                throw ('Native '+$Project+' '+$command+' failed with exit code '+$process.ExitCode+'. Last output:'+[Environment]::NewLine+$details)
+            }
         }finally{$process.Dispose()}
     }
     $worker=Join-Path $output ('target/release/'+$executable)
