@@ -203,7 +203,7 @@ jobs:
             if ($LASTEXITCODE) { throw 'ARM64 UI formatting check failed.' }
             cargo clippy --locked --manifest-path (Join-Path $ui.Snapshot 'Cargo.toml') --all-targets -- -D warnings
             if ($LASTEXITCODE) { throw 'ARM64 UI Clippy failed.' }
-            $stage = 'ARM64 PE architecture and worker protocol'
+            $stage = 'ARM64 PE architecture after package and integration checks'
             function Assert-Arm64Pe([string]$Path) {
               $stream = [IO.File]::OpenRead($Path)
               try {
@@ -218,12 +218,7 @@ jobs:
             }
             Assert-Arm64Pe $backend.WorkerPath
             Assert-Arm64Pe $ui.WorkerPath
-            $records = @('{"version":1,"operation":"metadata"}' | & $backend.WorkerPath | ForEach-Object { $_ | ConvertFrom-Json })
-            if ($LASTEXITCODE -ne 0 -or $records.Count -lt 2 -or $records[0].type -ne 'metadata' -or
-                $records[0].mappings.Count -ne 13 -or $records[-1].type -ne 'result' -or $records[-1].ok -ne $true) {
-              throw 'The native ARM64 worker metadata protocol check failed.'
-            }
-            Write-Output 'PASS: native ARM64 backend/UI unit suites, release PE architecture and read-only worker protocol.'
+            Write-Output 'PASS: native ARM64 backend/UI unit suites, guarded provider and UI integration, and release PE architecture.'
           } catch {
             $detail = "Failed stage: $stage`nMessage: $($_.Exception.Message)`nScript: $($_.ScriptStackTrace)"
             [IO.File]::WriteAllText($diagnosticPath, $detail, (New-Object Text.UTF8Encoding($false)))
@@ -298,7 +293,7 @@ jobs:
             if ($LASTEXITCODE) { throw 'x64 UI formatting check failed.' }
             cargo clippy --locked --manifest-path (Join-Path $ui.Snapshot 'Cargo.toml') --all-targets -- -D warnings
             if ($LASTEXITCODE) { throw 'x64 UI Clippy failed.' }
-            $stage = 'x64 PE architecture and worker protocol'
+            $stage = 'x64 PE architecture after package and integration checks'
             function Assert-X64Pe([string]$Path) {
               $stream = [IO.File]::OpenRead($Path)
               try {
@@ -313,12 +308,7 @@ jobs:
             }
             Assert-X64Pe $backend.WorkerPath
             Assert-X64Pe $ui.WorkerPath
-            $records = @('{"version":1,"operation":"metadata"}' | & $backend.WorkerPath | ForEach-Object { $_ | ConvertFrom-Json })
-            if ($LASTEXITCODE -ne 0 -or $records.Count -lt 2 -or $records[0].type -ne 'metadata' -or
-                $records[0].mappings.Count -ne 13 -or $records[-1].type -ne 'result' -or $records[-1].ok -ne $true) {
-              throw 'The native x64 worker metadata protocol check failed.'
-            }
-            Write-Output 'PASS: x64 backend/UI unit suites, visible preview install/launch fixture, package integrity, PE architecture and read-only worker protocol.'
+            Write-Output 'PASS: x64 backend/UI unit suites, visible preview install/launch fixture, package integrity and release PE architecture.'
           } catch {
             $detail = "Failed stage: $stage`nMessage: $($_.Exception.Message)`nScript: $($_.ScriptStackTrace)"
             [IO.File]::WriteAllText($diagnosticPath, $detail, (New-Object Text.UTF8Encoding($false)))
