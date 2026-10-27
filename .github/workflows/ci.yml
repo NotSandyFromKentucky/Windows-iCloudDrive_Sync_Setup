@@ -183,10 +183,11 @@ jobs:
             $ui = ./tools/Build-RustUI.ps1 -Test
             $stage = 'visible Rust UI parity and guarded registry integration'
             ./tests/Test-RustUI.ps1 -WorkerPath $ui.WorkerPath -BackendWorkerPath $backend.WorkerPath -RunNativeIntegration -NoHiddenDesktop
+            $stage = 'preview package assembly and source/hash verification'
+            $package = ./tools/New-RustUIPackage.ps1 -BuildInfo (Join-Path $ui.Snapshot 'build-info.json') -BackendBuildInfo (Join-Path $backend.Snapshot 'build-info.json')
             $stage = 'synthetic Cloud Files provider integration'
             ./tests/Test-NativeCloudFiles.ps1 -Snapshot $backend.Snapshot -NoHiddenDesktop
-            $stage = 'preview package build and install/launch fixtures'
-            $package = ./tools/New-RustUIPackage.ps1 -BuildInfo (Join-Path $ui.Snapshot 'build-info.json') -BackendBuildInfo (Join-Path $backend.Snapshot 'build-info.json')
+            $stage = 'preview package install/launch fixtures'
             ./tests/Test-RustUIPackage.ps1 -PackageDirectory $package.Directory -RunNativeIntegration -NoHiddenDesktop
             $stage = 'backend formatting and Clippy'
             $env:CARGO_TARGET_DIR = Join-Path $backend.Snapshot 'target'
@@ -277,10 +278,11 @@ jobs:
             $ui = ./tools/Build-RustUI.ps1 -Test
             $stage = 'visible Rust UI parity and guarded registry integration'
             ./tests/Test-RustUI.ps1 -WorkerPath $ui.WorkerPath -BackendWorkerPath $backend.WorkerPath -RunNativeIntegration -NoHiddenDesktop
+            $stage = 'preview package assembly and source/hash verification'
+            $package = ./tools/New-RustUIPackage.ps1 -BuildInfo (Join-Path $ui.Snapshot 'build-info.json') -BackendBuildInfo (Join-Path $backend.Snapshot 'build-info.json')
             $stage = 'synthetic Cloud Files provider integration'
             ./tests/Test-NativeCloudFiles.ps1 -Snapshot $backend.Snapshot -NoHiddenDesktop
-            $stage = 'preview package build and install/launch/tamper fixtures'
-            $package = ./tools/New-RustUIPackage.ps1 -BuildInfo (Join-Path $ui.Snapshot 'build-info.json') -BackendBuildInfo (Join-Path $backend.Snapshot 'build-info.json')
+            $stage = 'preview package install/launch/tamper fixtures'
             ./tests/Test-RustUIPackage.ps1 -PackageDirectory $package.Directory -RunNativeIntegration -NoHiddenDesktop
             $stage = 'backend formatting and Clippy'
             $env:CARGO_TARGET_DIR = Join-Path $backend.Snapshot 'target'
