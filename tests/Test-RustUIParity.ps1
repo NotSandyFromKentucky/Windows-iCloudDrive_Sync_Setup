@@ -72,7 +72,12 @@ function Invoke-NativeBackend([string]$Worker,[string]$Request){
         $bytes=[Text.Encoding]::UTF8.GetBytes($Request)
         $process.StandardInput.BaseStream.Write($bytes,0,$bytes.Length);$process.StandardInput.Close()
         if(-not $process.WaitForExit(30000)){throw 'Native backend query timed out'}
-        Assert ($process.ExitCode -eq 0 -and $stderr.Result -eq '') 'Native backend default-path query failed'
+        if($process.ExitCode -ne 0 -or $stderr.Result -ne ''){
+            $stdoutText=[string]$stdout.Result;$stderrText=[string]$stderr.Result
+            if($stdoutText.Length -gt 2000){$stdoutText=$stdoutText.Substring(0,2000)}
+            if($stderrText.Length -gt 2000){$stderrText=$stderrText.Substring(0,2000)}
+            throw ('Native backend default-path query failed (exit '+$process.ExitCode+'). stderr: '+$stderrText+' stdout: '+$stdoutText)
+        }
         return @($stdout.Result -split '\r?\n'|Where-Object {$_}|ForEach-Object {$_|ConvertFrom-Json})
     }finally{if(-not $process.HasExited){$process.Kill();$process.WaitForExit()};$process.Dispose()}
 }
