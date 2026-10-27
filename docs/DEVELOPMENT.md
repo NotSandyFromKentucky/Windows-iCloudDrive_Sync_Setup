@@ -8,6 +8,7 @@
 | Root PS1 files | Thin graphical, installation, command-line, diagnostic and copy entry points. Open-ICloudFolderSetup.ps1 retains the legacy console wrapper. |
 | Root PSM1 files | Folder mapping/registry backend, explicit copy/merge, GUI and per-user installation. |
 | docs/ | User CLI reference, architecture, development guidance and verification evidence. |
+| docs/history/ | Archived dated continuation handoffs; current status stays in docs/CONTEXT.md and history is not part of release packages. |
 | tests/ | Fixture suites plus guarded disposable-Windows integration and API experiments. |
 | tools/ | Immutable release packaging/publication and the explicit cloud round-trip helper. |
 | backend/ | Experimental Rust worker; generated metadata and compiler outputs stay outside the source tree. |
