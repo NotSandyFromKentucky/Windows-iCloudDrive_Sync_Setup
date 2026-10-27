@@ -62,26 +62,22 @@ function Start-UIWithEnvironment([string]$Arguments,[hashtable]$Environment){
     }
 }
 function Invoke-NativeBackend([string]$Worker,[string]$Request){
-    $info=New-Object Diagnostics.ProcessStartInfo
-    $info.FileName=$Worker;$info.UseShellExecute=$false;$info.CreateNoWindow=$true
-    $info.RedirectStandardInput=$true;$info.RedirectStandardOutput=$true;$info.RedirectStandardError=$true
-    $info.StandardOutputEncoding=New-Object Text.UTF8Encoding($false)
-    $info.StandardInputEncoding=New-Object Text.UTF8Encoding($false)
-    $process=[Diagnostics.Process]::Start($info)
+    if([string]::IsNullOrWhiteSpace($Request)){throw 'Native backend test request is empty.'}
+    $previousEncoding=$OutputEncoding
     try{
-        $stdout=$process.StandardOutput.ReadToEndAsync();$stderr=$process.StandardError.ReadToEndAsync()
-        $process.StandardInput.Write($Request)
-        $process.StandardInput.Flush()
-        $process.StandardInput.Close()
-        if(-not $process.WaitForExit(30000)){throw 'Native backend query timed out'}
-        if($process.ExitCode -ne 0 -or $stderr.Result -ne ''){
-            $stdoutText=[string]$stdout.Result;$stderrText=[string]$stderr.Result
+        $OutputEncoding=New-Object Text.UTF8Encoding($false)
+        $raw=@($Request | & $Worker 2>&1)
+        $exitCode=$LASTEXITCODE
+        $nativeErrors=@($raw|Where-Object {$_ -is [System.Management.Automation.ErrorRecord]})
+        $stdoutText=(@($raw|Where-Object {$_ -isnot [System.Management.Automation.ErrorRecord]}|ForEach-Object {[string]$_}) -join [Environment]::NewLine)
+        $stderrText=(@($nativeErrors|ForEach-Object {[string]$_.ToString()}) -join [Environment]::NewLine)
+        if($exitCode -ne 0 -or $nativeErrors.Count -gt 0){
             if($stdoutText.Length -gt 2000){$stdoutText=$stdoutText.Substring(0,2000)}
             if($stderrText.Length -gt 2000){$stderrText=$stderrText.Substring(0,2000)}
-            throw ('Native backend default-path query failed (exit '+$process.ExitCode+'). stderr: '+$stderrText+' stdout: '+$stdoutText)
+            throw ('Native backend default-path query failed (exit '+$exitCode+'). stderr: '+$stderrText+' stdout: '+$stdoutText)
         }
-        return @($stdout.Result -split '\r?\n'|Where-Object {$_}|ForEach-Object {$_|ConvertFrom-Json})
-    }finally{if(-not $process.HasExited){$process.Kill();$process.WaitForExit()};$process.Dispose()}
+        return @($stdoutText -split '\r?\n'|Where-Object {$_}|ForEach-Object {$_|ConvertFrom-Json})
+    }finally{$OutputEncoding=$previousEncoding}
 }
 $fixture=Join-Path ([IO.Path]::GetTempPath()) ('ICloudRustUIFixture-'+[guid]::NewGuid().ToString('N'))
 $null=[IO.Directory]::CreateDirectory((Join-Path $fixture 'tools'))
