@@ -36,8 +36,9 @@ use windows_sys::Win32::{
             CfUnregisterSyncRoot,
         },
         FileSystem::{
-            BY_HANDLE_FILE_INFORMATION, CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_OVERLAPPED,
-            FILE_SHARE_READ, GetFileInformationByHandle, OPEN_EXISTING, ReadFile,
+            BY_HANDLE_FILE_INFORMATION, CreateFileW, FILE_ATTRIBUTE_NORMAL,
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OVERLAPPED, FILE_SHARE_READ, FILE_SHARE_WRITE,
+            FlushFileBuffers, GetFileInformationByHandle, OPEN_EXISTING, ReadFile, WriteFile,
         },
     },
     System::IO::{GetOverlappedResult, OVERLAPPED},
@@ -45,6 +46,46 @@ use windows_sys::Win32::{
 
 const RANGE_BYTES: usize = 64 * 1024;
 const CONTENT_BYTES: usize = RANGE_BYTES * 3 + 997;
+
+#[repr(C)]
+struct NativeUnicodeString {
+    length: u16,
+    maximum_length: u16,
+    buffer: *mut u16,
+}
+
+#[repr(C)]
+struct NativeObjectAttributes {
+    length: u32,
+    root_directory: HANDLE,
+    object_name: *mut NativeUnicodeString,
+    attributes: u32,
+    security_descriptor: *mut c_void,
+    security_quality_of_service: *mut c_void,
+}
+
+#[repr(C)]
+struct NativeIoStatusBlock {
+    status: isize,
+    information: usize,
+}
+
+#[link(name = "ntdll")]
+unsafe extern "system" {
+    fn NtCreateFile(
+        file_handle: *mut HANDLE,
+        desired_access: u32,
+        object_attributes: *mut NativeObjectAttributes,
+        io_status_block: *mut NativeIoStatusBlock,
+        allocation_size: *const i64,
+        file_attributes: u32,
+        share_access: u32,
+        create_disposition: u32,
+        create_options: u32,
+        ea_buffer: *const c_void,
+        ea_length: u32,
+    ) -> i32;
+}
 
 struct ProviderContext {
     content: Vec<u8>,
@@ -408,6 +449,144 @@ fn register_provider(root: PathBuf, context: &ProviderContext) -> RegisteredProv
     );
     provider.connection = connection;
     provider
+}
+
+fn create_relative_child(parent: HANDLE, name: &str, directory: bool) -> HANDLE {
+    let mut name: Vec<u16> = name.encode_utf16().collect();
+    assert!(!name.is_empty() && name.len() <= u16::MAX as usize / 2);
+    assert!(
+        name.iter()
+            .all(|unit| *unit != 0 && *unit != b'/' as u16 && *unit != b'\\' as u16)
+    );
+    let length = (name.len() * size_of::<u16>()) as u16;
+    let mut unicode_name = NativeUnicodeString {
+        length,
+        maximum_length: length,
+        buffer: name.as_mut_ptr(),
+    };
+    let mut attributes = NativeObjectAttributes {
+        length: size_of::<NativeObjectAttributes>() as u32,
+        root_directory: parent,
+        object_name: &mut unicode_name,
+        attributes: 0x40,
+        security_descriptor: ptr::null_mut(),
+        security_quality_of_service: ptr::null_mut(),
+    };
+    let mut io_status = NativeIoStatusBlock {
+        status: 0,
+        information: 0,
+    };
+    let mut handle = ptr::null_mut();
+    let desired_access = 0x0010_0000 | 0x80 | if directory { 0x1 | 0x20 } else { 0x2 };
+    let create_options = 0x20 | if directory { 0x1 } else { 0x40 };
+    // SAFETY: every pointer is live for the call and RootDirectory is an owned sync-root
+    // directory handle. The name is validated to be one child component.
+    let status = unsafe {
+        NtCreateFile(
+            &mut handle,
+            desired_access,
+            &mut attributes,
+            &mut io_status,
+            ptr::null(),
+            if directory {
+                0x10
+            } else {
+                FILE_ATTRIBUTE_NORMAL
+            },
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            2, // FILE_CREATE
+            create_options,
+            ptr::null(),
+            0,
+        )
+    };
+    assert!(
+        status >= 0 && !handle.is_null(),
+        "NtCreateFile failed: 0x{:08X}",
+        status as u32
+    );
+    handle
+}
+
+#[test]
+#[ignore = "registers a disposable Cloud Files sync root; run via Test-NativeCloudFiles.ps1"]
+fn handle_relative_create_works_under_registered_cloud_root() {
+    let context = ProviderContext {
+        content: Vec::new(),
+        callback_count: AtomicUsize::new(0),
+        maximum_transfer: AtomicUsize::new(0),
+        last_required_offset: AtomicUsize::new(0),
+        execute_failure: AtomicUsize::new(0),
+    };
+    let root = std::env::temp_dir().join(format!(
+        "icloud-cfapi-relative-create-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock should be after Unix epoch")
+            .as_nanos()
+    ));
+    let provider = register_provider(root.clone(), &context);
+    let wide_root = wide_path(&root);
+    let root_handle = unsafe {
+        CreateFileW(
+            wide_root.as_ptr(),
+            0x80 | 0x1 | 0x20,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS,
+            ptr::null_mut(),
+        )
+    };
+    assert!(
+        !root_handle.is_null() && root_handle != INVALID_HANDLE_VALUE,
+        "could not open registered sync root (Win32 error {})",
+        unsafe { GetLastError() }
+    );
+
+    let directory_handle = create_relative_child(root_handle, "relative-child", true);
+    let file_handle = create_relative_child(directory_handle, "created.bin", false);
+    let content = b"created relative to a pinned Cloud Files directory";
+    let mut written = 0;
+    assert_ne!(
+        unsafe {
+            WriteFile(
+                file_handle,
+                content.as_ptr(),
+                content.len() as u32,
+                &mut written,
+                ptr::null_mut(),
+            )
+        },
+        0,
+        "WriteFile failed (Win32 error {})",
+        unsafe { GetLastError() }
+    );
+    assert_eq!(written as usize, content.len());
+    assert_ne!(
+        unsafe { FlushFileBuffers(file_handle) },
+        0,
+        "FlushFileBuffers failed (Win32 error {})",
+        unsafe { GetLastError() }
+    );
+    let directory_path = root.join("relative-child");
+    let renamed_path = root.join("renamed-child");
+    assert!(
+        fs::rename(&directory_path, &renamed_path).is_err(),
+        "newly created Cloud Files directory was renamed while its handle was held"
+    );
+    assert_eq!(
+        fs::read(directory_path.join("created.bin")).unwrap(),
+        content
+    );
+
+    unsafe {
+        CloseHandle(file_handle);
+        CloseHandle(directory_handle);
+        CloseHandle(root_handle);
+    }
+    drop(provider);
 }
 
 #[test]

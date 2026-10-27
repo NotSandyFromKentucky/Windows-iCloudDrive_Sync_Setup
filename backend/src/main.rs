@@ -30,13 +30,18 @@ use windows_sys::Win32::{
         DACL_SECURITY_INFORMATION, GetTokenInformation, PROTECTED_DACL_SECURITY_INFORMATION,
         SECURITY_ATTRIBUTES, SetFileSecurityW, TOKEN_QUERY, TOKEN_USER, TokenUser,
     },
+    Storage::CloudFilters::{
+        CF_PLACEHOLDER_STATE_INVALID, CF_PLACEHOLDER_STATE_PARTIAL,
+        CF_PLACEHOLDER_STATE_PARTIALLY_ON_DISK, CF_PLACEHOLDER_STATE_PLACEHOLDER,
+        CfGetPlaceholderStateFromAttributeTag,
+    },
     Storage::FileSystem::{
         BY_HANDLE_FILE_INFORMATION, CreateDirectoryW, CreateFileW, FILE_ATTRIBUTE_DEVICE,
         FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_TAG_INFO, FILE_FLAG_BACKUP_SEMANTICS,
         FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
-        FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TYPE_DISK, FileAttributeTagInfo,
+        FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TYPE_DISK, FileAttributeTagInfo, FlushFileBuffers,
         GetFileInformationByHandle, GetFileInformationByHandleEx, GetFileType, GetFullPathNameW,
-        OPEN_EXISTING, ReadFile,
+        OPEN_EXISTING, ReadFile, WriteFile,
     },
     System::{
         Environment::ExpandEnvironmentStringsW,
@@ -56,7 +61,48 @@ use windows_sys::Win32::{
 const REQUEST_LIMIT: u64 = 65536;
 const ENTRY_LIMIT: usize = 10000;
 const DEPTH_LIMIT: usize = 64;
+const COPY_REVIEW_PAGE_LIMIT: usize = 1024 * 1024;
 const REPARSE_OR_ENCRYPTED: u32 = 0x400 | 0x4000;
+
+#[repr(C)]
+struct NativeUnicodeString {
+    length: u16,
+    maximum_length: u16,
+    buffer: *mut u16,
+}
+
+#[repr(C)]
+struct NativeObjectAttributes {
+    length: u32,
+    root_directory: HANDLE,
+    object_name: *mut NativeUnicodeString,
+    attributes: u32,
+    security_descriptor: *mut std::ffi::c_void,
+    security_quality_of_service: *mut std::ffi::c_void,
+}
+
+#[repr(C)]
+struct NativeIoStatusBlock {
+    status: isize,
+    information: usize,
+}
+
+#[link(name = "ntdll")]
+unsafe extern "system" {
+    fn NtCreateFile(
+        file_handle: *mut HANDLE,
+        desired_access: u32,
+        object_attributes: *mut NativeObjectAttributes,
+        io_status_block: *mut NativeIoStatusBlock,
+        allocation_size: *const i64,
+        file_attributes: u32,
+        share_access: u32,
+        create_disposition: u32,
+        create_options: u32,
+        ea_buffer: *const std::ffi::c_void,
+        ea_length: u32,
+    ) -> i32;
+}
 const BACKUP_BYTE_LIMIT: usize = 4 * 1024 * 1024;
 const UTF8_BOM: &[u8] = b"\xEF\xBB\xBF";
 const SHELL_KEY: &str =
@@ -173,6 +219,19 @@ enum Request {
         verified_sync_root: bool,
         #[serde(default)]
         folder_paths: BTreeMap<String, PathBuf>,
+    },
+    CopyPreviewPage {
+        version: u32,
+        root: PathBuf,
+        #[serde(default)]
+        reset_to_defaults: bool,
+        #[serde(default)]
+        include_music: bool,
+        #[serde(default)]
+        verified_sync_root: bool,
+        #[serde(default)]
+        folder_paths: BTreeMap<String, PathBuf>,
+        page_offset: usize,
     },
     CopyApply {
         version: u32,
@@ -400,6 +459,332 @@ struct CopyReview {
     folder_paths: BTreeMap<String, PathBuf>,
     pairs: Vec<CopyPair>,
     entries: Vec<Entry>,
+    path_guards: Vec<CopyDirectoryIdentity>,
+}
+
+#[derive(Clone, Serialize)]
+struct CopyDirectoryIdentity {
+    path: String,
+    volume_serial: u32,
+    file_index_high: u32,
+    file_index_low: u32,
+}
+
+fn copy_directory_identity(path: &Path) -> Result<Option<CopyDirectoryIdentity>> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("Cannot inspect {}: {error}", path.display())),
+    };
+    if !metadata.is_dir() {
+        return Ok(None);
+    }
+    let attributes = metadata.file_attributes();
+    if attributes & FILE_ATTRIBUTE_ENCRYPTED != 0 {
+        return Err(format!(
+            "Encrypted paths are not supported: {}",
+            path.display()
+        ));
+    }
+    if attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        && !is_cloud_file_reparse_tag(cloud_file_reparse_tag(path)?)
+    {
+        return Err(format!(
+            "Links or unsupported reparse points are not supported: {}",
+            path.display()
+        ));
+    }
+    use std::os::windows::ffi::OsStrExt;
+    let wide_path: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let handle = unsafe {
+        CreateFileW(
+            wide_path.as_ptr(),
+            FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+        return Err(format!(
+            "Cannot capture folder identity for {} (Windows error {}).",
+            path.display(),
+            unsafe { GetLastError() }
+        ));
+    }
+    let handle = Win32ReadHandle(handle);
+    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    if unsafe { GetFileInformationByHandle(handle.0, &mut info) } == 0
+        || info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY == 0
+    {
+        return Err(format!(
+            "Cannot capture a stable directory identity for {}.",
+            path.display()
+        ));
+    }
+    Ok(Some(CopyDirectoryIdentity {
+        path: text(path)?,
+        volume_serial: info.dwVolumeSerialNumber,
+        file_index_high: info.nFileIndexHigh,
+        file_index_low: info.nFileIndexLow,
+    }))
+}
+
+fn copy_path_directory_identities(
+    pairs: &[CopyPair],
+    entries: &[Entry],
+) -> Result<Vec<CopyDirectoryIdentity>> {
+    let mut candidates = BTreeMap::<OrdinalPath, PathBuf>::new();
+    for path in pairs
+        .iter()
+        .flat_map(|pair| [pair.source.as_path(), pair.destination.as_path()])
+        .chain(
+            entries
+                .iter()
+                .flat_map(|entry| [Path::new(&entry.source), Path::new(&entry.destination)]),
+        )
+    {
+        for ancestor in path.ancestors() {
+            match fs::symlink_metadata(ancestor) {
+                Ok(metadata) if metadata.is_dir() => {
+                    candidates
+                        .entry(OrdinalPath::new(ancestor)?)
+                        .or_insert_with(|| ancestor.to_path_buf());
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(format!("Cannot inspect {}: {error}", ancestor.display()));
+                }
+            }
+        }
+    }
+    const DIRECTORY_GUARD_LIMIT: usize = ENTRY_LIMIT + 4096;
+    if candidates.len() > DIRECTORY_GUARD_LIMIT {
+        return Err("Copy plan has too many directory identity guards.".into());
+    }
+    candidates
+        .values()
+        .map(|path| {
+            copy_directory_identity(path)?
+                .ok_or_else(|| format!("A reviewed directory disappeared: {}", path.display()))
+        })
+        .collect()
+}
+
+fn lock_copy_review_directories(
+    review: &CopyReview,
+) -> Result<(Vec<Win32ReadHandle>, BTreeMap<OrdinalPath, HANDLE>)> {
+    let mut guards = review
+        .path_guards
+        .iter()
+        .map(|guard| {
+            let path = PathBuf::from(&guard.path);
+            let depth = path.components().count();
+            (depth, path, guard)
+        })
+        .collect::<Vec<_>>();
+    guards.sort_by(|left, right| left.0.cmp(&right.0));
+
+    let mut handles = Vec::with_capacity(guards.len());
+    let mut by_path = BTreeMap::new();
+    for (_, path, expected) in guards {
+        use std::os::windows::ffi::OsStrExt;
+        let wide_path: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        // Omitting FILE_SHARE_DELETE keeps a reviewed ancestor from being renamed or
+        // removed while Apply uses paths beneath it. Parent handles are acquired first.
+        let handle = unsafe {
+            CreateFileW(
+                wide_path.as_ptr(),
+                FILE_READ_ATTRIBUTES | 0x1 | 0x20,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
+                std::ptr::null_mut(),
+            )
+        };
+        if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+            return Err(format!(
+                "Cannot hold reviewed directory stable for {} (Windows error {}).",
+                path.display(),
+                unsafe { GetLastError() }
+            ));
+        }
+        let handle = Win32ReadHandle(handle);
+        let mut info = BY_HANDLE_FILE_INFORMATION::default();
+        if unsafe { GetFileInformationByHandle(handle.0, &mut info) } == 0
+            || info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY == 0
+            || info.dwVolumeSerialNumber != expected.volume_serial
+            || info.nFileIndexHigh != expected.file_index_high
+            || info.nFileIndexLow != expected.file_index_low
+        {
+            return Err(format!(
+                "A reviewed directory changed before Apply: {}.",
+                path.display()
+            ));
+        }
+        by_path.insert(OrdinalPath::new(&path)?, handle.0);
+        handles.push(handle);
+    }
+    Ok((handles, by_path))
+}
+
+fn create_copy_child(parent: HANDLE, path: &Path, directory: bool) -> Result<Win32ReadHandle> {
+    use std::os::windows::ffi::OsStrExt;
+    let component = path.file_name().ok_or_else(|| {
+        format!(
+            "Destination has no final path component: {}",
+            path.display()
+        )
+    })?;
+    let mut name: Vec<u16> = component.encode_wide().collect();
+    if name.is_empty()
+        || name.len() > u16::MAX as usize / 2
+        || name
+            .iter()
+            .any(|unit| *unit == 0 || *unit == b'/' as u16 || *unit == b'\\' as u16)
+    {
+        return Err(format!("Invalid destination component: {}", path.display()));
+    }
+    let name_length = (name.len() * std::mem::size_of::<u16>()) as u16;
+    let mut unicode_name = NativeUnicodeString {
+        length: name_length,
+        maximum_length: name_length,
+        buffer: name.as_mut_ptr(),
+    };
+    let mut attributes = NativeObjectAttributes {
+        length: std::mem::size_of::<NativeObjectAttributes>() as u32,
+        root_directory: parent,
+        object_name: &mut unicode_name,
+        attributes: 0x40, // OBJ_CASE_INSENSITIVE
+        security_descriptor: std::ptr::null_mut(),
+        security_quality_of_service: std::ptr::null_mut(),
+    };
+    let mut io_status = NativeIoStatusBlock {
+        status: 0,
+        information: 0,
+    };
+    let mut handle = std::ptr::null_mut();
+    const SYNCHRONIZE_ACCESS: u32 = 0x0010_0000;
+    const FILE_WRITE_DATA_ACCESS: u32 = 0x0000_0002;
+    const FILE_LIST_DIRECTORY_ACCESS: u32 = 0x0000_0001;
+    const FILE_TRAVERSE_ACCESS: u32 = 0x0000_0020;
+    const FILE_READ_ATTRIBUTES_ACCESS: u32 = 0x0000_0080;
+    const FILE_CREATE_DISPOSITION: u32 = 2;
+    const FILE_DIRECTORY_CREATE_OPTION: u32 = 0x0000_0001;
+    const FILE_SYNCHRONOUS_IO_NONALERT_OPTION: u32 = 0x0000_0020;
+    const FILE_NON_DIRECTORY_CREATE_OPTION: u32 = 0x0000_0040;
+    let desired_access = SYNCHRONIZE_ACCESS
+        | FILE_READ_ATTRIBUTES_ACCESS
+        | if directory {
+            FILE_LIST_DIRECTORY_ACCESS | FILE_TRAVERSE_ACCESS
+        } else {
+            FILE_WRITE_DATA_ACCESS
+        };
+    let create_options = FILE_SYNCHRONOUS_IO_NONALERT_OPTION
+        | if directory {
+            FILE_DIRECTORY_CREATE_OPTION
+        } else {
+            FILE_NON_DIRECTORY_CREATE_OPTION
+        };
+    // SAFETY: all native structures and UTF-16 storage remain live through the call. The
+    // RootDirectory is an owned, pinned directory handle and the name is one child component.
+    let status = unsafe {
+        NtCreateFile(
+            &mut handle,
+            desired_access,
+            &mut attributes,
+            &mut io_status,
+            std::ptr::null(),
+            if directory {
+                FILE_ATTRIBUTE_DIRECTORY
+            } else {
+                0x80
+            },
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            FILE_CREATE_DISPOSITION,
+            create_options,
+            std::ptr::null(),
+            0,
+        )
+    };
+    if status < 0 || handle.is_null() || handle == INVALID_HANDLE_VALUE {
+        return Err(format!(
+            "Cannot create destination {} relative to its pinned parent (NTSTATUS 0x{:08X}).",
+            path.display(),
+            status as u32
+        ));
+    }
+    Ok(Win32ReadHandle(handle))
+}
+
+fn copy_review_page(
+    review: &CopyReview,
+    page_offset: usize,
+    approval_token: &str,
+) -> Result<serde_json::Value> {
+    let total_entries = review.entries.len();
+    if page_offset > total_entries {
+        return Err("Copy review page starts beyond the end of the reviewed plan.".into());
+    }
+    let mut preview = serde_json::json!({
+        "operation": review.operation,
+        "root": review.root,
+        "reset_to_defaults": review.reset_to_defaults,
+        "review_gates_passed": review.review_gates_passed,
+        "root_registered": review.root_registered,
+        "registered_roots": review.registered_roots,
+        "page_offset": page_offset,
+        "next_offset": null,
+        "total_entries": total_entries,
+        "entries": [],
+    });
+    let empty_response = serde_json::json!({
+        "version": 1,
+        "type": "copy_preview_page",
+        "preview": preview,
+        "approval_token": approval_token,
+    });
+    let mut response_bytes = serde_json::to_vec(&empty_response)
+        .map_err(|error| error.to_string())?
+        .len()
+        .saturating_add(32);
+    let entries = preview["entries"]
+        .as_array_mut()
+        .expect("page entries are initialized as an array");
+    for entry in review.entries.iter().skip(page_offset) {
+        let row = serde_json::json!({
+            "source": entry.source,
+            "destination": entry.destination,
+            "directory": entry.directory,
+            "action": entry.action,
+        });
+        let row_bytes = serde_json::to_vec(&row)
+            .map_err(|error| error.to_string())?
+            .len()
+            .saturating_add(usize::from(!entries.is_empty()));
+        if response_bytes.saturating_add(row_bytes) > COPY_REVIEW_PAGE_LIMIT {
+            if entries.is_empty() {
+                return Err("A single copy-review row exceeds the bounded page size.".into());
+            }
+            break;
+        }
+        response_bytes = response_bytes.saturating_add(row_bytes);
+        entries.push(row);
+    }
+    let next_offset = page_offset + entries.len();
+    if next_offset < total_entries {
+        preview["next_offset"] = next_offset.into();
+    }
+    Ok(serde_json::json!({
+        "version": 1,
+        "type": "copy_preview_page",
+        "preview": preview,
+        "approval_token": approval_token,
+    }))
 }
 
 #[derive(Deserialize, Serialize)]
@@ -1939,6 +2324,7 @@ fn copy_review_cancellable(
     let Some(entries) = plan_entries_cancellable(&pairs, cancellation, progress)? else {
         return Ok(None);
     };
+    let path_guards = copy_path_directory_identities(&pairs, &entries)?;
     Ok(Some(CopyReview {
         operation: if reset_to_defaults {
             "copy_to_windows_defaults"
@@ -1961,6 +2347,7 @@ fn copy_review_cancellable(
         folder_paths: folder_paths.clone(),
         pairs,
         entries,
+        path_guards,
     }))
 }
 
@@ -3008,6 +3395,43 @@ impl Read for Win32ReadHandle {
     }
 }
 
+impl Write for Win32ReadHandle {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        if buffer.is_empty() {
+            return Ok(0);
+        }
+        let requested = buffer.len().min(u32::MAX as usize) as u32;
+        let mut written = 0u32;
+        // SAFETY: this handle is opened synchronously with FILE_WRITE_DATA for copy targets,
+        // and buffer is readable for the requested number of bytes.
+        if unsafe {
+            WriteFile(
+                self.0,
+                buffer.as_ptr(),
+                requested,
+                &mut written,
+                std::ptr::null_mut(),
+            )
+        } == 0
+        {
+            return Err(io::Error::from_raw_os_error(
+                unsafe { GetLastError() } as i32
+            ));
+        }
+        Ok(written as usize)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        // SAFETY: only copy-target handles call flush, and they are live synchronous file handles.
+        if unsafe { FlushFileBuffers(self.0) } == 0 {
+            return Err(io::Error::from_raw_os_error(
+                unsafe { GetLastError() } as i32
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl Drop for Win32ReadHandle {
     fn drop(&mut self) {
         // SAFETY: this wrapper owns the valid synchronous file handle returned by CreateFileW.
@@ -3040,6 +3464,15 @@ fn handle_file_tag(handle: HANDLE) -> Result<FILE_ATTRIBUTE_TAG_INFO> {
         ));
     }
     Ok(info)
+}
+
+fn cloud_placeholder_needs_hydration(info: &FILE_ATTRIBUTE_TAG_INFO) -> Result<bool> {
+    let state =
+        unsafe { CfGetPlaceholderStateFromAttributeTag(info.FileAttributes, info.ReparseTag) };
+    if state == CF_PLACEHOLDER_STATE_INVALID || state & CF_PLACEHOLDER_STATE_PLACEHOLDER == 0 {
+        return Err("Cloud Files returned an invalid placeholder state.".into());
+    }
+    Ok(state & (CF_PLACEHOLDER_STATE_PARTIAL | CF_PLACEHOLDER_STATE_PARTIALLY_ON_DISK) != 0)
 }
 
 fn file_size(info: &BY_HANDLE_FILE_INFORMATION) -> u64 {
@@ -3171,12 +3604,17 @@ fn hash_cloud_placeholder(
         return Err("The file changed or is not a Cloud Files placeholder.".into());
     }
 
-    hydrate_cloud_placeholder(handle, file_size(&before), cancellation)?;
+    if cloud_placeholder_needs_hydration(&tag)? {
+        hydrate_cloud_placeholder(handle, file_size(&before), cancellation)?;
+    }
     let mut hydrated = BY_HANDLE_FILE_INFORMATION::default();
     if unsafe { GetFileInformationByHandle(handle, &mut hydrated) } == 0
         || !stable_file_identity(&before, &hydrated)
     {
         return Err("Cloud Files placeholder metadata changed during hydration.".into());
+    }
+    if cloud_placeholder_needs_hydration(&handle_file_tag(handle)?)? {
+        return Err("Cloud Files still reports that placeholder data is not ready.".into());
     }
     drop(placeholder);
 
@@ -3683,6 +4121,7 @@ fn apply_copy_review(
     cancellation: &CopyCancellation,
     output: &mut impl Write,
 ) -> Result<serde_json::Value> {
+    let (mut directory_locks, mut directory_handles) = lock_copy_review_directories(review)?;
     let entries = &review.entries;
     let total = entries.iter().filter(|entry| !entry.directory).count();
     let mut completed = 0usize;
@@ -3701,7 +4140,15 @@ fn apply_copy_review(
         validate_path(destination)?;
         if entry.directory {
             match guarded_copy_metadata(destination)? {
-                Some(metadata) if metadata.is_dir() => continue,
+                Some(metadata) if metadata.is_dir() => {
+                    if !directory_handles.contains_key(&OrdinalPath::new(destination)?) {
+                        return Err(format!(
+                            "Destination directory was not pinned for Apply: {}",
+                            destination.display()
+                        ));
+                    }
+                    continue;
+                }
                 Some(_) => {
                     return Err(format!(
                         "Destination changed to a file: {}",
@@ -3710,20 +4157,31 @@ fn apply_copy_review(
                 }
                 None => {
                     validate_path(destination)?;
-                    fs::create_dir(destination).map_err(|error| {
+                    let parent = destination.parent().ok_or_else(|| {
                         format!(
-                            "Cannot create destination directory {}: {error}",
+                            "Destination has no parent directory: {}",
                             destination.display()
                         )
                     })?;
-                    if !guarded_copy_metadata(destination)?
-                        .is_some_and(|metadata| metadata.is_dir())
+                    let parent_key = OrdinalPath::new(parent)?;
+                    let parent_handle = *directory_handles.get(&parent_key).ok_or_else(|| {
+                        format!(
+                            "Destination parent was not pinned for Apply: {}",
+                            parent.display()
+                        )
+                    })?;
+                    let child = create_copy_child(parent_handle, destination, true)?;
+                    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+                    if unsafe { GetFileInformationByHandle(child.0, &mut info) } == 0
+                        || info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY == 0
                     {
                         return Err(format!(
                             "Created destination is not a safe directory: {}",
                             destination.display()
                         ));
                     }
+                    directory_handles.insert(OrdinalPath::new(destination)?, child.0);
+                    directory_locks.push(child);
                 }
             }
             continue;
@@ -3764,16 +4222,20 @@ fn apply_copy_review(
             None => {}
         }
         let mut input = open_copy_input(source)?;
-        let mut target = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(destination)
-            .map_err(|error| {
-                format!(
-                    "Cannot create destination {} without overwriting: {error}",
-                    destination.display()
-                )
-            })?;
+        let parent = destination.parent().ok_or_else(|| {
+            format!(
+                "Destination has no parent directory: {}",
+                destination.display()
+            )
+        })?;
+        let parent_key = OrdinalPath::new(parent)?;
+        let parent_handle = *directory_handles.get(&parent_key).ok_or_else(|| {
+            format!(
+                "Destination parent was not pinned for Apply: {}",
+                parent.display()
+            )
+        })?;
+        let mut target = create_copy_child(parent_handle, destination, false)?;
         io::copy(&mut input.data, &mut target).map_err(|error| {
             format!(
                 "Copy stopped at {}: {error}. The partial destination is retained for inspection.",
@@ -3872,6 +4334,7 @@ fn run(input: impl Read, output: &mut impl Write) -> Result<bool> {
         | Request::CopyPlan { version, .. }
         | Request::CopyPairs { version, .. }
         | Request::CopyPreview { version, .. }
+        | Request::CopyPreviewPage { version, .. }
         | Request::CopyApply { version, .. }
         | Request::SetupPreview { version, .. }
         | Request::SetupApply { version, .. }
@@ -3982,6 +4445,29 @@ fn run(input: impl Read, output: &mut impl Write) -> Result<bool> {
                 output,
                 &serde_json::json!({"version":1,"type":"copy_preview","preview":review,"approval_token":token}),
             )?;
+        }
+        Request::CopyPreviewPage {
+            root,
+            reset_to_defaults,
+            include_music,
+            verified_sync_root,
+            folder_paths,
+            page_offset,
+            ..
+        } => {
+            let _settings_mutex = acquire_settings_mutex()?;
+            let review = copy_review(
+                &map,
+                &root,
+                reset_to_defaults,
+                include_music,
+                verified_sync_root,
+                &folder_paths,
+                false,
+            )?;
+            let token = approval_token(&review)?;
+            let page = copy_review_page(&review, page_offset, &token)?;
+            emit(output, &page)?;
         }
         Request::CopyApply {
             root,
@@ -4422,6 +4908,7 @@ mod tests {
             source,
             destination,
         }];
+        let path_guards = copy_path_directory_identities(&pairs, &entries).unwrap();
         (
             root,
             CopyReview {
@@ -4436,6 +4923,7 @@ mod tests {
                 folder_paths: BTreeMap::new(),
                 pairs,
                 entries,
+                path_guards,
             },
         )
     }
@@ -4788,6 +5276,69 @@ mod tests {
     }
 
     #[test]
+    fn copy_apply_holds_reviewed_ancestors_against_rename() {
+        let (root, review) = copy_apply_fixture();
+        let (locks, _) = lock_copy_review_directories(&review).unwrap();
+        let moved = root.with_extension("moved");
+        let rename = fs::rename(&root, &moved);
+        assert!(
+            rename.is_err(),
+            "reviewed ancestor was renamed while pinned"
+        );
+        assert!(root.is_dir());
+        assert!(!moved.exists());
+        drop(locks);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn copy_apply_creates_children_relative_to_pinned_directories() {
+        let (root, review) = copy_apply_fixture();
+        let (locks, by_path) = lock_copy_review_directories(&review).unwrap();
+        let parent = *by_path.get(&OrdinalPath::new(&root).unwrap()).unwrap();
+        let directory_path = root.join("relative-created");
+        let directory = create_copy_child(parent, &directory_path, true).unwrap();
+        let moved = directory_path.with_extension("moved");
+        assert!(
+            fs::rename(&directory_path, &moved).is_err(),
+            "newly created directory was renamed while its returned handle was held"
+        );
+
+        let file_path = directory_path.join("created.txt");
+        let mut file = create_copy_child(directory.0, &file_path, false).unwrap();
+        file.write_all(b"created through pinned parent").unwrap();
+        file.flush().unwrap();
+        assert_eq!(
+            fs::read(&file_path).unwrap(),
+            b"created through pinned parent"
+        );
+
+        drop(file);
+        drop(directory);
+        drop(locks);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn copy_apply_rejects_directory_identity_drift_before_writing() {
+        let (root, mut review) = copy_apply_fixture();
+        review.path_guards[0].file_index_low ^= 1;
+        let (name, owner) = create_copy_cancel_event(false);
+        let cancellation = open_copy_cancellation(&name).unwrap();
+        unsafe { CloseHandle(owner) };
+        let mut output = Vec::new();
+
+        let error = apply_copy_review(&review, &cancellation, &mut output).unwrap_err();
+        assert!(error.contains("reviewed directory changed"), "{error}");
+        assert!(
+            !root.join("destination").exists(),
+            "identity drift wrote a destination"
+        );
+        drop(cancellation);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn copy_apply_preflight_cancels_during_fresh_plan_without_writing() {
         let root = std::env::temp_dir().join(format!(
             "icloud-copy-preflight-cancel-{}-{}",
@@ -4834,7 +5385,7 @@ mod tests {
         let mut output = Vec::new();
 
         let error = apply_copy_review(&review, &cancellation, &mut output).unwrap_err();
-        assert!(error.contains("Nothing was overwritten"));
+        assert!(error.contains("not pinned for Apply"), "{error}");
         assert_eq!(
             fs::read(destination.join("first.txt")).unwrap(),
             b"keeper bytes"
@@ -5059,6 +5610,58 @@ mod tests {
         preview["rows"][0]["proposed"] = "C:\\Users\\Test\\Desktop".into();
         preview["review_gates_passed"] = false.into();
         assert_ne!(approval_token(&preview).unwrap(), original);
+    }
+
+    #[test]
+    fn copy_review_pages_are_byte_bounded_and_keep_the_full_plan_token() {
+        let review = CopyReview {
+            operation: "copy_to_icloud",
+            root: "C:\\Drive".into(),
+            reset_to_defaults: false,
+            include_music: false,
+            verified_sync_root: true,
+            review_gates_passed: true,
+            root_registered: Some(true),
+            registered_roots: vec!["C:\\Drive".into()],
+            folder_paths: BTreeMap::new(),
+            pairs: Vec::new(),
+            path_guards: Vec::new(),
+            entries: (0..100)
+                .map(|index| Entry {
+                    source: format!("C:\\Source\\{index:03}\\{}", "s".repeat(7000)),
+                    destination: format!("C:\\Drive\\{index:03}\\{}", "d".repeat(7000)),
+                    directory: false,
+                    hash: Some("A".repeat(64)),
+                    action: "Copy",
+                })
+                .collect(),
+        };
+        let token = approval_token(&review).unwrap();
+        let first = copy_review_page(&review, 0, &token).unwrap();
+        let first_bytes = serde_json::to_vec(&first).unwrap();
+        assert!(first_bytes.len() <= COPY_REVIEW_PAGE_LIMIT);
+        assert_eq!(first["preview"]["total_entries"], review.entries.len());
+        assert_eq!(first["preview"]["page_offset"], 0);
+        assert!(first["preview"]["pairs"].is_null());
+        assert_eq!(first["approval_token"], token);
+        let next = first["preview"]["next_offset"].as_u64().unwrap() as usize;
+        assert!(next > 0 && next < review.entries.len());
+
+        let second = copy_review_page(&review, next, &token).unwrap();
+        assert!(serde_json::to_vec(&second).unwrap().len() <= COPY_REVIEW_PAGE_LIMIT);
+        assert_eq!(second["preview"]["page_offset"], next);
+        assert!(second["preview"]["next_offset"].is_null());
+        assert_eq!(
+            first["preview"]["entries"].as_array().unwrap().len()
+                + second["preview"]["entries"].as_array().unwrap().len(),
+            review.entries.len()
+        );
+        assert_eq!(second["approval_token"], token);
+
+        let mut changed = review;
+        changed.entries[0].source.push('x');
+        assert_ne!(approval_token(&changed).unwrap(), token);
+        assert!(copy_review_page(&changed, usize::MAX, &token).is_err());
     }
 
     #[test]
@@ -5489,6 +6092,44 @@ mod tests {
             assert!(!is_cloud_file_reparse_tag(tag), "tag {tag:#010X}");
         }
     }
+
+    #[test]
+    fn cloud_placeholder_state_skips_complete_data_and_detects_partial_data() {
+        let tag = 0x9000_601A;
+        let complete = FILE_ATTRIBUTE_TAG_INFO {
+            FileAttributes: 0x420,
+            ReparseTag: tag,
+        };
+        assert!(!cloud_placeholder_needs_hydration(&complete).unwrap());
+
+        let partial = FILE_ATTRIBUTE_TAG_INFO {
+            FileAttributes: 0x420
+                | windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS,
+            ReparseTag: tag,
+        };
+        assert!(cloud_placeholder_needs_hydration(&partial).unwrap());
+    }
+
+    #[test]
+    #[ignore = "reads the explicitly selected live Cloud Files file and may hydrate it"]
+    fn explicit_live_cloud_file_hash_probe() {
+        let path = PathBuf::from(
+            std::env::var_os("ICLOUD_TEST_CLOUD_PATH")
+                .expect("Set ICLOUD_TEST_CLOUD_PATH to a dedicated cloud test file."),
+        );
+        let expected = std::env::var("ICLOUD_TEST_CLOUD_SHA256")
+            .expect("Set ICLOUD_TEST_CLOUD_SHA256 to the recorded test file hash.");
+        let tag = cloud_file_reparse_tag(&path).unwrap();
+        assert!(
+            tag == 0 || is_cloud_file_reparse_tag(tag),
+            "selected file reparse tag {tag:#010X} is neither a regular file nor a Cloud Files placeholder"
+        );
+        let provider = CngSha256Provider::new().unwrap();
+        let mut buffer = vec![0; 64 * 1024];
+        let actual = hash(&path, &provider, &mut buffer).unwrap();
+        assert_eq!(actual, expected, "live Cloud Files content hash changed");
+    }
+
     #[test]
     fn copy_pair_derivation_deduplicates_aliases_and_obeys_music_and_custom_paths() {
         let map: Vec<Mapping> = serde_json::from_str(MAP).unwrap();

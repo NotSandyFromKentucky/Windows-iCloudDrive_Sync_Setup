@@ -85,6 +85,8 @@ const RECOVERY: usize = 120;
 const HELP: usize = 121;
 const INSTALL: usize = 122;
 const DESKTOP_SHORTCUT: usize = 123;
+const PREVIOUS_PAGE: usize = 124;
+const NEXT_PAGE: usize = 125;
 const ACTIONS: [&str; 9] = [
     "Set up iCloud folders",
     "Reset to Windows defaults",
@@ -219,6 +221,8 @@ struct State {
     technical: HWND,
     table: HWND,
     table_label: HWND,
+    previous_page: HWND,
+    next_page: HWND,
     dry: HWND,
     browse_root: HWND,
     browse_backup: HWND,
@@ -229,6 +233,11 @@ struct State {
     desktop_shortcut: HWND,
     reviewed: Option<Options>,
     review_token: Option<String>,
+    copy_reviewed: Option<Options>,
+    copy_review_token: Option<String>,
+    copy_page_expected_token: Option<String>,
+    copy_page_offsets: Vec<usize>,
+    copy_page_next_offset: Option<usize>,
     running_options: Option<Options>,
     running_phase: String,
     raw: String,
@@ -905,23 +914,46 @@ fn native_restore_preview(
     restore_preview_result(&previews[0]["preview"], &options.backup, token)
 }
 
-fn copy_preview_request(options: &Options) -> serde_json::Value {
+fn copy_preview_request(options: &Options, page_offset: usize) -> serde_json::Value {
     let reset_to_defaults = options.action == ACTIONS[4];
     serde_json::json!({
         "version": 1,
-        "operation": "copy_preview",
+        "operation": "copy_preview_page",
         "root": options.root,
         "reset_to_defaults": reset_to_defaults,
         "include_music": options.music || reset_to_defaults,
         "verified_sync_root": options.verified,
         "folder_paths": if reset_to_defaults { serde_json::json!({}) } else { serde_json::to_value(&options.folder_paths).unwrap_or_default() },
+        "page_offset": page_offset,
     })
 }
 
 fn copy_preview_result(preview: &serde_json::Value, token: &str) -> Result<WorkerResult, String> {
     let entries = preview["entries"]
         .as_array()
-        .ok_or("The Rust copy preview omitted its entries.")?;
+        .ok_or("The Rust copy preview page omitted its entries.")?;
+    let page_offset = preview["page_offset"]
+        .as_u64()
+        .ok_or("The Rust copy preview page omitted its starting row.")?;
+    let total_entries = preview["total_entries"]
+        .as_u64()
+        .ok_or("The Rust copy preview page omitted its total row count.")?;
+    let next_offset = match &preview["next_offset"] {
+        serde_json::Value::Null => None,
+        value => Some(
+            value
+                .as_u64()
+                .ok_or("The Rust copy preview page returned an invalid next-row offset.")?,
+        ),
+    };
+    let expected_next = page_offset.saturating_add(entries.len() as u64);
+    if page_offset > total_entries
+        || expected_next > total_entries
+        || next_offset.is_some_and(|next| next != expected_next || next >= total_entries)
+        || (expected_next < total_entries && next_offset.is_none())
+    {
+        return Err("The Rust copy preview page has inconsistent row bounds.".into());
+    }
     let rows: Vec<_> = entries
         .iter()
         .map(|entry| {
@@ -942,6 +974,9 @@ fn copy_preview_result(preview: &serde_json::Value, token: &str) -> Result<Worke
         "ReviewGatesPassed": passed,
         "ResetToDefaults": preview["reset_to_defaults"],
         "ApprovalToken": token,
+        "PageOffset": page_offset,
+        "NextOffset": next_offset,
+        "TotalEntries": total_entries,
         "Rows": rows,
     });
     Ok(WorkerResult {
@@ -979,11 +1014,12 @@ fn native_copy_preview(
     options: &Options,
     worker: &Path,
     source: &Path,
+    page_offset: usize,
     stop: &AtomicBool,
     sender: &mpsc::SyncSender<WorkerMessage>,
 ) -> Result<WorkerResult, String> {
     let Some(records) = native_records(
-        copy_preview_request(options),
+        copy_preview_request(options, page_offset),
         worker,
         source,
         stop,
@@ -1002,10 +1038,10 @@ fn native_copy_preview(
     };
     let previews: Vec<_> = records
         .iter()
-        .filter(|record| record["type"] == "copy_preview")
+        .filter(|record| record["type"] == "copy_preview_page")
         .collect();
     if previews.len() != 1 {
-        return Err("The Rust backend returned no unique file-copy preview.".into());
+        return Err("The Rust backend returned no unique file-copy preview page.".into());
     }
     let preview = &previews[0]["preview"];
     let token = previews[0]["approval_token"]
@@ -1497,6 +1533,7 @@ fn operation(
     options: Options,
     phase: String,
     review_token: Option<String>,
+    copy_page_offset: usize,
     stop: Arc<AtomicBool>,
     sender: mpsc::SyncSender<WorkerMessage>,
 ) -> Result<WorkerResult, String> {
@@ -1516,14 +1553,21 @@ fn operation(
         || (options.action == "Set up iCloud folders" && phase == "Preview")
         || (options.action == "Reset to Windows defaults" && phase == "Preview")
         || (options.action == "Restore a recovery backup" && phase == "DryRun")
-        || (options.copy() && phase == "Preview")
+        || (options.copy() && matches!(phase.as_str(), "Preview" | "CopyPage"))
         || native_apply_requested;
     if needs_native {
         let configured = std::env::var_os("ICLOUD_NATIVE_BACKEND").map(PathBuf::from);
         let bundled = source.join("RustUI/icloud-folder-worker.exe");
         if let Some(worker) = configured.or_else(|| bundled.is_file().then_some(bundled)) {
-            return if options.copy() && phase == "Preview" {
-                native_copy_preview(&options, &worker, &source, &stop, &sender)
+            return if options.copy() && matches!(phase.as_str(), "Preview" | "CopyPage") {
+                native_copy_preview(
+                    &options,
+                    &worker,
+                    &source,
+                    copy_page_offset,
+                    &stop,
+                    &sender,
+                )
             } else if native_copy_apply_requested {
                 let cancellation = CancelEvent::new()?;
                 native_copy_apply(
@@ -2082,6 +2126,28 @@ impl State {
                 TABLE,
             )?
         };
+        let previous_page = unsafe {
+            control(
+                window,
+                "BUTTON",
+                "Previous page",
+                WS_TABSTOP | BS_PUSHBUTTON as u32,
+                PREVIOUS_PAGE,
+            )?
+        };
+        let next_page = unsafe {
+            control(
+                window,
+                "BUTTON",
+                "Next page",
+                WS_TABSTOP | BS_PUSHBUTTON as u32,
+                NEXT_PAGE,
+            )?
+        };
+        unsafe {
+            ShowWindow(previous_page, SW_HIDE);
+            ShowWindow(next_page, SW_HIDE);
+        }
         unsafe {
             SendMessageW(
                 table,
@@ -2235,6 +2301,8 @@ impl State {
             technical,
             table,
             table_label,
+            previous_page,
+            next_page,
             dry,
             browse_root,
             browse_backup,
@@ -2245,6 +2313,11 @@ impl State {
             desktop_shortcut,
             reviewed: None,
             review_token: None,
+            copy_reviewed: None,
+            copy_review_token: None,
+            copy_page_expected_token: None,
+            copy_page_offsets: Vec::new(),
+            copy_page_next_offset: None,
             running_options: None,
             running_phase: String::new(),
             raw: String::new(),
@@ -2649,6 +2722,7 @@ impl State {
     fn invalidate(&mut self) {
         self.reviewed = None;
         self.review_token = None;
+        self.reset_copy_review();
         self.table_ready = false;
         self.raw.clear();
         self.friendly.clear();
@@ -2659,6 +2733,14 @@ impl State {
         set_text(self.status, "");
         self.set_buttons_enabled(true);
         self.layout();
+    }
+    fn reset_copy_review(&mut self) {
+        self.copy_reviewed = None;
+        self.copy_review_token = None;
+        self.copy_page_expected_token = None;
+        self.copy_page_offsets.clear();
+        self.copy_page_next_offset = None;
+        set_text(self.table_label, "Folder results");
     }
     fn refresh(&mut self) {
         let custom = checked(self.advanced);
@@ -2970,12 +3052,31 @@ impl State {
                 status_width,
                 result_height,
             );
+            let can_page = self.table_ready
+                && action.starts_with("Copy files")
+                && (self.copy_page_offsets.len() > 1 || self.copy_page_next_offset.is_some());
+            let navigation_width = if can_page { 174 } else { 0 };
             put(
                 self.table_label,
                 status_x,
                 result_top,
-                status_width,
-                scaled(20, self.dpi),
+                (status_width - navigation_width).max(80),
+                20,
+            );
+            let page_button_width = 82;
+            put(
+                self.previous_page,
+                status_x + status_width - navigation_width,
+                result_top,
+                page_button_width,
+                22,
+            );
+            put(
+                self.next_page,
+                status_x + status_width - page_button_width,
+                result_top,
+                page_button_width,
+                22,
             );
             put(self.table, status_x, table_top, status_width, table_height);
 
@@ -3002,6 +3103,22 @@ impl State {
             ShowWindow(
                 self.table_label,
                 if self.table_ready && !checked(self.technical) {
+                    SW_SHOW
+                } else {
+                    SW_HIDE
+                },
+            );
+            ShowWindow(
+                self.previous_page,
+                if can_page && !checked(self.technical) && self.copy_page_offsets.len() > 1 {
+                    SW_SHOW
+                } else {
+                    SW_HIDE
+                },
+            );
+            ShowWindow(
+                self.next_page,
+                if can_page && !checked(self.technical) && self.copy_page_next_offset.is_some() {
                     SW_SHOW
                 } else {
                     SW_HIDE
@@ -3233,6 +3350,17 @@ impl State {
         {
             if let Ok(report) = serde_json::from_str::<serde_json::Value>(result.text.trim()) {
                 if let Some(values) = report["Rows"].as_array() {
+                    let page_offset = report["PageOffset"].as_u64().unwrap_or(0) as usize;
+                    let total_entries = report["TotalEntries"].as_u64().unwrap_or(0) as usize;
+                    self.copy_reviewed = self.running_options.clone();
+                    self.copy_review_token = report["ApprovalToken"].as_str().map(str::to_owned);
+                    self.copy_page_next_offset = report["NextOffset"].as_u64().map(|v| v as usize);
+                    let first_row = if values.is_empty() { 0 } else { page_offset + 1 };
+                    let last_row = page_offset + values.len();
+                    set_text(
+                        self.table_label,
+                        &format!("Folder results: rows {first_row}–{last_row} of {total_entries}"),
+                    );
                     self.set_table_headers(["Source", "Destination", "Type", "Action"]);
                     unsafe {
                         SendMessageW(self.table, LVM_DELETEALLITEMS, 0, 0);
@@ -3264,10 +3392,10 @@ impl State {
                     let gate_status = if report["ReviewGatesPassed"] == true {
                         "Review checks passed. No files or folders have changed."
                     } else {
-                        "Review the registration acknowledgement before applying."
+                        "Review checks need attention. Apply remains unavailable."
                     };
                     self.friendly = format!(
-                        "{}\r\nCopy target: {}\r\nWindows registration: {}\r\n{}\r\nOriginals stay in place; folder settings are unchanged. Cloud files may download.",
+                        "{}\r\nShowing rows {first_row}–{last_row} of {total_entries}.\r\nCopy target: {}\r\nWindows registration: {}\r\n{}\r\nOriginals stay in place; folder settings are unchanged. Cloud files may download.",
                         result.message,
                         if report["ResetToDefaults"] == true {
                             "Windows default folders"
@@ -3517,6 +3645,10 @@ impl State {
             Operation::DryRun => "DryRun",
             _ => "Preview",
         };
+        if phase == "Preview" && options.copy() {
+            self.reset_copy_review();
+            self.copy_page_offsets.push(0);
+        }
         if op == Operation::Apply {
             if self.reviewed.as_ref() != Some(&options) {
                 set_text(
@@ -3534,16 +3666,62 @@ impl State {
                 }
             }
         }
-        self.start(options, phase);
+        self.start(options, phase, 0);
     }
-    fn start(&mut self, options: Options, phase: &str) {
+    fn change_copy_page(&mut self, next: bool) {
+        if self.is_running {
+            return;
+        }
+        let options = match self.snapshot() {
+            Ok(options) => options,
+            Err(error) => {
+                set_text(self.status, &error);
+                return;
+            }
+        };
+        if !options.copy()
+            || self.copy_reviewed.as_ref() != Some(&options)
+            || self.copy_review_token.is_none()
+        {
+            self.invalidate();
+            return;
+        }
+        let offset = if next {
+            let Some(offset) = self.copy_page_next_offset else {
+                return;
+            };
+            if self.copy_page_offsets.last().copied() == Some(offset) {
+                return;
+            }
+            self.copy_page_offsets.push(offset);
+            offset
+        } else {
+            if self.copy_page_offsets.len() <= 1 {
+                return;
+            }
+            self.copy_page_offsets.pop();
+            *self.copy_page_offsets.last().unwrap_or(&0)
+        };
+        self.start(options, "CopyPage", offset);
+    }
+    fn start(&mut self, options: Options, phase: &str, copy_page_offset: usize) {
         let review_token = if phase == "Apply" {
             self.review_token.take()
         } else {
             None
         };
-        self.reviewed = None;
-        self.review_token = None;
+        if phase == "CopyPage" {
+            self.copy_page_expected_token = self.copy_review_token.clone();
+        } else if phase == "Preview" && options.copy() {
+            self.copy_page_expected_token = None;
+        } else {
+            self.copy_page_expected_token = None;
+            self.reset_copy_review();
+        }
+        if phase != "CopyPage" {
+            self.reviewed = None;
+            self.review_token = None;
+        }
         self.table_ready = false;
         self.running_options = Some(options.clone());
         self.running_phase = phase.into();
@@ -3554,7 +3732,14 @@ impl State {
         match thread::Builder::new()
             .name("folder-operation".into())
             .spawn(move || {
-                let result = operation(options, phase, review_token, stop, send.clone());
+                let result = operation(
+                    options,
+                    phase,
+                    review_token,
+                    copy_page_offset,
+                    stop,
+                    send.clone(),
+                );
                 let _ = send.send(WorkerMessage::Finished(result));
             }) {
             Ok(_) => {
@@ -3620,6 +3805,31 @@ impl State {
                     self.is_running = false;
                     match result {
                         Ok(result) => {
+                            if self.running_phase == "CopyPage" {
+                                let current_token = serde_json::from_str::<serde_json::Value>(
+                                    result.text.trim(),
+                                )
+                                .ok()
+                                .and_then(|report| {
+                                    report["ApprovalToken"].as_str().map(str::to_owned)
+                                });
+                                if current_token != self.copy_page_expected_token {
+                                    self.reset_copy_review();
+                                    self.reviewed = None;
+                                    self.review_token = None;
+                                    self.raw.clear();
+                                    self.friendly = "The copy plan changed while loading this page. Preview again before applying.".into();
+                                    set_text(self.status_label, &self.friendly);
+                                    self.render();
+                                    self.running_options = None;
+                                    self.set_buttons_enabled(true);
+                                    unsafe {
+                                        KillTimer(self.window, 1);
+                                        SetFocus(self.preview);
+                                    }
+                                    return;
+                                }
+                            }
                             if result.exit_code == 0
                                 && self.running_phase != "Apply"
                                 && self
@@ -3639,6 +3849,11 @@ impl State {
                             self.show_report(&result);
                         }
                         Err(e) => {
+                            if self.running_phase == "CopyPage" {
+                                self.reset_copy_review();
+                                self.reviewed = None;
+                                self.review_token = None;
+                            }
                             self.raw = e.clone();
                             self.friendly = e.clone();
                             set_text(
@@ -3678,6 +3893,8 @@ impl State {
             self.help,
             self.install,
             self.desktop_shortcut,
+            self.previous_page,
+            self.next_page,
             self.browse_root,
             self.browse_backup,
         ] {
@@ -3692,6 +3909,14 @@ impl State {
             enabled
                 && self.snapshot().ok().as_ref() == self.reviewed.as_ref()
                 && self.reviewed.is_some(),
+        );
+        enable(
+            self.previous_page,
+            enabled && self.copy_page_offsets.len() > 1 && self.copy_review_token.is_some(),
+        );
+        enable(
+            self.next_page,
+            enabled && self.copy_page_next_offset.is_some() && self.copy_review_token.is_some(),
         );
         enable(self.cancel_btn, !enabled);
     }
@@ -3914,6 +4139,7 @@ unsafe extern "system" fn window_proc(
                 else if event==BN_CLICKED{
                     match id{
                         PREVIEW=>state.run_operation(Operation::Preview),APPLY=>state.run_operation(Operation::Apply),CHECK=>state.run_operation(Operation::Check),DRY=>state.run_operation(Operation::DryRun),
+                        PREVIOUS_PAGE=>state.change_copy_page(false),NEXT_PAGE=>state.change_copy_page(true),
                         MUSIC|ADVANCED|VERIFIED|KEEP|DESKTOP_SHORTCUT=>{state.refresh();state.invalidate();},
                         TECHNICAL=>state.render(),
                         BROWSE_ROOT|BROWSE_BACKUP|SAVE=>state.browse(id),
@@ -3922,7 +4148,7 @@ unsafe extern "system" fn window_proc(
                         HELP=>{if let Some(root)=SOURCE.get(){state.open_location(root.join("README.md").as_os_str());}},
                         INSTALL=>{
                             if let Ok(mut options)=state.snapshot(){options.action="Install for me".into();options.folder_paths.clear();
-                                match confirm(state.window,&options){Ok(true)=>state.start(options,"Apply"),Ok(false)=>{},Err(e)=>set_text(state.status_label,&e)}
+                                match confirm(state.window,&options){Ok(true)=>state.start(options,"Apply",0),Ok(false)=>{},Err(e)=>set_text(state.status_label,&e)}
                             }
                         }
                         _=>{}
@@ -4255,8 +4481,9 @@ mod tests {
         options
             .folder_paths
             .insert("Desktop".into(), "C:\\Drive\\Work Desktop".into());
-        let preview = copy_preview_request(&options);
-        assert_eq!(preview["operation"], "copy_preview");
+        let preview = copy_preview_request(&options, 7);
+        assert_eq!(preview["operation"], "copy_preview_page");
+        assert_eq!(preview["page_offset"], 7);
         assert_eq!(preview["reset_to_defaults"], false);
         assert_eq!(preview["include_music"], true);
         assert_eq!(preview["verified_sync_root"], true);
@@ -4280,7 +4507,7 @@ mod tests {
         );
 
         options.action = ACTIONS[4].into();
-        let defaults = copy_preview_request(&options);
+        let defaults = copy_preview_request(&options, 0);
         assert_eq!(defaults["reset_to_defaults"], true);
         assert_eq!(defaults["include_music"], true);
         assert_eq!(defaults["folder_paths"], serde_json::json!({}));
@@ -4295,6 +4522,9 @@ mod tests {
             "registered_roots":[],
             "review_gates_passed":false,
             "reset_to_defaults":false,
+            "page_offset":0,
+            "next_offset":null,
+            "total_entries":1,
             "entries":[{"directory":false,"source":"C:\\Users\\Test\\Desktop\\a.txt","destination":"C:\\Drive\\Desktop\\a.txt","action":"Copy"}]
         });
         let result = copy_preview_result(&preview, &"B".repeat(64)).unwrap();
@@ -4304,6 +4534,30 @@ mod tests {
         assert_eq!(report["Rows"].as_array().unwrap().len(), 1);
         assert_eq!(report["Rows"][0]["Type"], "File");
         assert_eq!(report["Rows"][0]["Action"], "Copy");
+        assert_eq!(report["PageOffset"], 0);
+        assert_eq!(report["TotalEntries"], 1);
+        assert_eq!(report["NextOffset"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn copy_preview_page_rejects_inconsistent_paging_metadata() {
+        let token = "B".repeat(64);
+        let preview = serde_json::json!({
+            "operation":"copy_to_icloud",
+            "root":"C:\\Drive",
+            "root_registered":true,
+            "registered_roots":["C:\\Drive"],
+            "review_gates_passed":true,
+            "reset_to_defaults":false,
+            "page_offset":4,
+            "next_offset":9,
+            "total_entries":10,
+            "entries":[{"directory":false,"source":"C:\\a","destination":"C:\\b","action":"Copy"}]
+        });
+        assert!(copy_preview_result(&preview, &token).is_err());
+        let mut valid = preview;
+        valid["next_offset"] = 5.into();
+        assert_eq!(copy_preview_result(&valid, &token).unwrap().exit_code, 0);
     }
 
     #[test]

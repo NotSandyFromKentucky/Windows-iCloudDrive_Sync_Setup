@@ -12,6 +12,8 @@ Add-Type -Path (Join-Path $PSScriptRoot 'RustUIProbe.cs') -ReferencedAssemblies 
 function Assert($Value,[string]$Message){if(-not $Value){throw $Message}}
 function Wait-For([scriptblock]$Condition,[string]$Message){$end=[DateTime]::UtcNow.AddSeconds(20);while([DateTime]::UtcNow -lt $end){if(& $Condition){return};Start-Sleep -Milliseconds 30};throw $Message}
 function Control([int]$Id){[RustUIProbe]::GetDlgItem($script:window,$Id)}
+function TableLabel {([RustUIProbe]::Text((Control 404))).Trim()}
+function HasTablePage([int]$Page){(TableLabel) -like ('*rows '+$Page+'*of 2')}
 function Click([int]$Id){[RustUIProbe]::Click((Control $Id))}
 function Post-Click([int]$Id){[RustUIProbe]::PostMessage($script:window,0x0111,[IntPtr]$Id,[IntPtr]::Zero)|Out-Null}
 function Status {([RustUIProbe]::Text((Control 403)))+' '+([RustUIProbe]::Text((Control 103)))}
@@ -103,6 +105,35 @@ if($request.Action -eq 'Check iCloud configuration'){
 if($mode -eq 'mismatch'){exit 2};exit $code
 '@
 [IO.File]::WriteAllText((Join-Path $fixture 'tools/Invoke-WinUIBridge.ps1'),$stub)
+$fakeNativeSource=@'
+using System;
+using System.IO;
+using System.Text.RegularExpressions;
+public static class FakeNativeCopyWorker {
+    static string Quote(string value) { return "\""+value.Replace("\\", "\\\\").Replace("\"", "\\\"")+"\""; }
+    public static int Main() {
+        string request=Console.In.ReadToEnd();
+        Match match=Regex.Match(request,@"""page_offset""\s*:\s*(\d+)");
+        if(!match.Success){Console.Error.WriteLine("Missing page_offset");return 2;}
+        int offset=Int32.Parse(match.Groups[1].Value);
+        string folder=Path.GetDirectoryName(typeof(FakeNativeCopyWorker).Assembly.Location);
+        bool drift=offset>0 && File.Exists(Path.Combine(folder,"drift.flag"));
+        string token=new String(drift?'B':'A',64);
+        string next=offset==0?"1":"null";
+        string source=@"C:\Fixture\source-"+offset+".txt";
+        string destination=@"C:\Fixture\destination-"+offset+".txt";
+        string row="{\"directory\":false,\"source\":"+Quote(source)+",\"destination\":"+Quote(destination)+",\"action\":\"Copy\"}";
+        string root=Quote(@"C:\Fixture");
+        string page="{\"version\":1,\"type\":\"copy_preview_page\",\"preview\":{\"operation\":\"copy_to_icloud\",\"root\":"+root+",\"reset_to_defaults\":false,\"review_gates_passed\":true,\"root_registered\":true,\"registered_roots\":["+root+"],\"page_offset\":"+offset+",\"next_offset\":"+next+",\"total_entries\":2,\"entries\":["+row+"]},\"approval_token\":\""+token+"\"}";
+        File.AppendAllText(Path.Combine(folder,"page-requests.log"),offset+":"+(drift?"drift":"stable")+Environment.NewLine);
+        Console.WriteLine(page);
+        Console.WriteLine("{\"version\":1,\"type\":\"result\",\"ok\":true,\"read_only\":true}");
+        return 0;
+    }
+}
+'@
+$fakeNativeWorker=Join-Path $fixture 'fake-native-copy-worker.exe'
+Add-Type -TypeDefinition $fakeNativeSource -OutputType ConsoleApplication -OutputAssembly $fakeNativeWorker
 $evidence=Join-Path $repo '.local/rust-ui-parity';$null=[IO.Directory]::CreateDirectory($evidence)
 $previousDpi=[RustUIProbe]::SetThreadDpiAwarenessContext([IntPtr](-4))
 $inputDesktop=[ICloudTestDesktop]::InputName();$process=$null;$results=@();$script:copyApplyRunning=$false
@@ -220,6 +251,51 @@ try{
     $results+=[pscustomobject]@{Dpi=$dpi;ActionRoutes=$true;CloudTestBridge=$true;InstallBridge=($dpi -eq 96);Confirmation=$true;ReviewInvalidation=$true;StructuredTable=$true;CooperativeCopyStop=$true;WritesNotTerminated=$true}
     'PASS: DPI '+$dpi+' action routes, preview binding, confirmation/cancel, table, progress, safe copy stop, write protection, output bounds and clean close'
     Remove-Item -LiteralPath (Join-Path $fixture 'requests.jsonl') -Force
+ }
+ foreach($drift in @($false,$true)){
+    $requestLog=Join-Path $fixture 'page-requests.log'
+    if(Test-Path -LiteralPath $requestLog){Remove-Item -LiteralPath $requestLog -Force}
+    $driftFlag=Join-Path $fixture 'drift.flag'
+    if(Test-Path -LiteralPath $driftFlag){Remove-Item -LiteralPath $driftFlag -Force}
+    $script:process=Start-UIWithEnvironment '--mode Setup' @{ICLOUD_SCRIPT_ROOT=$fixture;ICLOUD_NATIVE_BACKEND=$fakeNativeWorker};$script:window=[IntPtr]::Zero
+    try{
+        Wait-For {$script:window=[RustUIProbe]::Find($process.Id);$window -ne [IntPtr]::Zero -and [RustUIProbe]::IsWindowVisible($window) -and (Control 110) -ne [IntPtr]::Zero} 'Paged-copy fixture UI window missing'
+        Choose 4
+        Click 1
+        Wait-For {[RustUIProbe]::IsWindowEnabled((Control 1))} 'Fake native copy preview did not finish'
+        Assert (HasTablePage 1) ('First native copy-review page did not render; status: '+(Status)+'; table label: '+(TableLabel))
+        Assert ([RustUIProbe]::IsWindowVisible((Control 125))) 'Next page control was hidden while another page was available'
+        Assert ([RustUIProbe]::IsWindowEnabled((Control 3))) 'Valid first copy-review page did not bind Apply'
+        Assert ([RustUIProbe]::Send((Control 115),0x1004,[IntPtr]::Zero,[IntPtr]::Zero).ToInt32() -eq 1) 'First native review page returned an unexpected row count'
+        if($drift){[IO.File]::WriteAllText($driftFlag,'change the full-plan token on the next page')}
+        Click 125
+        Wait-For {(Test-Path -LiteralPath $requestLog) -and @(Get-Content -LiteralPath $requestLog).Count -ge 2} 'Native worker did not receive the next-page request'
+        $pageCalls=@(Get-Content -LiteralPath $requestLog)
+        $expectedSecond=if($drift){'1:drift'}else{'1:stable'}
+        Assert ($pageCalls.Count -eq 2 -and $pageCalls[0] -eq '0:stable' -and $pageCalls[1] -eq $expectedSecond) ('UI did not request both native pages in order: '+($pageCalls -join ', '))
+        if($drift){
+            Wait-For {([RustUIProbe]::Text((Control 403)) -like '*copy plan changed while loading this page*')} 'Changed native plan did not invalidate the copy review'
+            Assert (-not [RustUIProbe]::IsWindowEnabled((Control 3))) 'Plan drift left Apply enabled'
+            Assert (-not [RustUIProbe]::IsWindowVisible((Control 115))) 'Plan drift left stale page rows visible'
+            Assert (-not [RustUIProbe]::IsWindowVisible((Control 124)) -and -not [RustUIProbe]::IsWindowVisible((Control 125))) 'Plan drift left stale page navigation visible'
+        }else{
+            Wait-For {HasTablePage 2} 'Second native copy-review page did not render'
+            Assert ([RustUIProbe]::IsWindowVisible((Control 124))) 'Previous page control was hidden after advancing'
+            Assert (-not [RustUIProbe]::IsWindowVisible((Control 125))) 'Next page control remained visible after the final page'
+            Assert ([RustUIProbe]::IsWindowEnabled((Control 3))) 'Stable page token lost the reviewed Apply binding'
+            Assert ([RustUIProbe]::Send((Control 115),0x1004,[IntPtr]::Zero,[IntPtr]::Zero).ToInt32() -eq 1) 'Second native review page returned an unexpected row count'
+            Click 124
+            Wait-For {HasTablePage 1} 'Previous native copy-review page did not return to the first page'
+        }
+        if(-not $drift){
+            $pageCalls=@(Get-Content -LiteralPath $requestLog)
+            Assert ($pageCalls.Count -eq 3 -and $pageCalls[2] -eq '0:stable') 'Previous-page navigation did not request the first page again'
+        }
+        if($drift){'PASS: native page token drift discards stale copy rows and disables Apply'}else{'PASS: native copy review navigates next/previous pages while preserving the full-plan Apply binding'}
+    }finally{
+        if($process -and -not $process.HasExited){[RustUIProbe]::PostMessage([RustUIProbe]::Find($process.Id),0x0010,[IntPtr]::Zero,[IntPtr]::Zero)|Out-Null;if(-not $process.WaitForExit(10000)){$process.Kill();$process.WaitForExit()}}
+        if($process){$process.Dispose();$process=$null}
+    }
  }
  if($BackendWorkerPath -and $RunNativeIntegration){
     $nativeRoot=Join-Path $fixture 'native-check-drive';$null=[IO.Directory]::CreateDirectory($nativeRoot)
