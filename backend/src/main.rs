@@ -9,12 +9,14 @@ use std::{
     os::windows::fs::{MetadataExt, OpenOptionsExt},
     path::{Component, Path, PathBuf, Prefix},
     slice,
+    time::{Duration, Instant},
 };
 use windows_sys::Win32::{
     Foundation::{
-        CloseHandle, ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_MORE_DATA,
-        ERROR_NO_MORE_ITEMS, ERROR_SUCCESS, GetLastError, HANDLE, HLOCAL, INVALID_HANDLE_VALUE,
-        LocalFree, SYSTEMTIME, WAIT_ABANDONED, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
+        CloseHandle, ERROR_ALREADY_EXISTS, ERROR_CLOUD_FILE_REQUEST_TIMEOUT, ERROR_FILE_NOT_FOUND,
+        ERROR_IO_INCOMPLETE, ERROR_MORE_DATA, ERROR_NO_MORE_ITEMS, ERROR_OPERATION_ABORTED,
+        ERROR_SUCCESS, GetLastError, HANDLE, HLOCAL, INVALID_HANDLE_VALUE, LocalFree, SYSTEMTIME,
+        WAIT_ABANDONED, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
     },
     Globalization::CompareStringOrdinal,
     Security::Authorization::{
@@ -40,11 +42,12 @@ use windows_sys::Win32::{
         FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_TAG_INFO, FILE_FLAG_BACKUP_SEMANTICS,
         FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
         FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TYPE_DISK, FileAttributeTagInfo, FlushFileBuffers,
-        GetFileInformationByHandle, GetFileInformationByHandleEx, GetFileType, GetFullPathNameW,
-        OPEN_EXISTING, ReadFile, WriteFile,
+        GetFileAttributesW, GetFileInformationByHandle, GetFileInformationByHandleEx, GetFileType,
+        GetFullPathNameW, INVALID_FILE_ATTRIBUTES, OPEN_EXISTING, ReadFile, WriteFile,
     },
     System::{
         Environment::ExpandEnvironmentStringsW,
+        IO::{CancelIoEx, DeviceIoControl},
         Registry::{
             HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_ENUMERATE_SUB_KEYS, KEY_QUERY_VALUE,
             KEY_SET_VALUE, REG_EXPAND_SZ, REG_SZ, RegCloseKey, RegDeleteValueW, RegEnumKeyExW,
@@ -63,6 +66,8 @@ const ENTRY_LIMIT: usize = 10000;
 const DEPTH_LIMIT: usize = 64;
 const COPY_REVIEW_PAGE_LIMIT: usize = 1024 * 1024;
 const REPARSE_OR_ENCRYPTED: u32 = 0x400 | 0x4000;
+const CLOUD_HYDRATION_RANGE_TIMEOUT: Duration = Duration::from_secs(120);
+const CLOUD_HYDRATION_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 #[repr(C)]
 struct NativeUnicodeString {
@@ -102,6 +107,37 @@ unsafe extern "system" {
         ea_buffer: *const std::ffi::c_void,
         ea_length: u32,
     ) -> i32;
+
+    fn RtlSetThreadPlaceholderCompatibilityMode(mode: i8) -> i8;
+    #[cfg(test)]
+    fn RtlQueryThreadPlaceholderCompatibilityMode() -> i8;
+}
+
+const PHCM_EXPOSE_PLACEHOLDERS: i8 = 2;
+
+struct PlaceholderCompatibilityMode(i8);
+
+impl PlaceholderCompatibilityMode {
+    fn expose() -> Result<Self> {
+        // SAFETY: mode 2 is PHCM_EXPOSE_PLACEHOLDERS; ntdll returns the previous mode or
+        // a negative PHCM_ERROR value. The guard restores the previous mode on drop.
+        let previous =
+            unsafe { RtlSetThreadPlaceholderCompatibilityMode(PHCM_EXPOSE_PLACEHOLDERS) };
+        if previous < 0 {
+            return Err(format!(
+                "Cannot expose Cloud Files placeholders to this worker thread (native status {previous})."
+            ));
+        }
+        Ok(Self(previous))
+    }
+}
+
+impl Drop for PlaceholderCompatibilityMode {
+    fn drop(&mut self) {
+        // SAFETY: the value was returned by the setter on this same thread, and restoring
+        // it cannot invalidate resources or alter file contents.
+        unsafe { RtlSetThreadPlaceholderCompatibilityMode(self.0) };
+    }
 }
 const BACKUP_BYTE_LIMIT: usize = 4 * 1024 * 1024;
 const UTF8_BOM: &[u8] = b"\xEF\xBB\xBF";
@@ -586,7 +622,7 @@ fn lock_copy_review_directories(
             (depth, path, guard)
         })
         .collect::<Vec<_>>();
-    guards.sort_by(|left, right| left.0.cmp(&right.0));
+    guards.sort_by_key(|guard| guard.0);
 
     let mut handles = Vec::with_capacity(guards.len());
     let mut by_path = BTreeMap::new();
@@ -1920,7 +1956,7 @@ fn persist_backup_new(
     if bytes.len() > BACKUP_BYTE_LIMIT {
         return Err("Recovery record exceeds the 4 MiB safety limit.".into());
     }
-    let result = (|| {
+    (|| {
         let mut file = OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -1951,8 +1987,7 @@ fn persist_backup_new(
             return Err("Recovery record round-trip did not preserve exact values.".into());
         }
         Ok(())
-    })();
-    result
+    })()
 }
 
 fn same_live_value(left: &StoredFolderValue, right: &StoredFolderValue) -> bool {
@@ -2269,28 +2304,51 @@ fn copy_review(
     copy_review_cancellable(
         map,
         root,
-        reset_to_defaults,
-        include_music,
-        verified_sync_root,
-        folder_paths,
-        applying,
-        None,
-        None,
+        CopyReviewOptions {
+            reset_to_defaults,
+            include_music,
+            verified_sync_root,
+            folder_paths,
+            applying,
+        },
+        CopyReviewRuntime {
+            cancellation: None,
+            progress: None,
+        },
     )?
     .ok_or_else(|| COPY_REVIEW_CANCELLED.into())
+}
+
+struct CopyReviewOptions<'a> {
+    reset_to_defaults: bool,
+    include_music: bool,
+    verified_sync_root: bool,
+    folder_paths: &'a BTreeMap<String, PathBuf>,
+    applying: bool,
+}
+
+struct CopyReviewRuntime<'a> {
+    cancellation: Option<&'a CopyCancellation>,
+    progress: Option<&'a mut dyn Write>,
 }
 
 fn copy_review_cancellable(
     map: &[Mapping],
     root: &Path,
-    reset_to_defaults: bool,
-    include_music: bool,
-    verified_sync_root: bool,
-    folder_paths: &BTreeMap<String, PathBuf>,
-    applying: bool,
-    cancellation: Option<&CopyCancellation>,
-    progress: Option<&mut dyn Write>,
+    options: CopyReviewOptions<'_>,
+    runtime: CopyReviewRuntime<'_>,
 ) -> Result<Option<CopyReview>> {
+    let CopyReviewOptions {
+        reset_to_defaults,
+        include_music,
+        verified_sync_root,
+        folder_paths,
+        applying,
+    } = options;
+    let CopyReviewRuntime {
+        cancellation,
+        progress,
+    } = runtime;
     if copy_cancelled(cancellation)? {
         return Ok(None);
     }
@@ -2445,9 +2503,11 @@ fn ensure_private_recovery_directory(path: &Path, sid: &str) -> Result<()> {
         ));
     }
     let descriptor = LocalAllocation(descriptor.cast());
-    let mut attributes = SECURITY_ATTRIBUTES::default();
-    attributes.nLength = std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32;
-    attributes.lpSecurityDescriptor = descriptor.0.cast();
+    let attributes = SECURITY_ATTRIBUTES {
+        nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: descriptor.0.cast(),
+        ..Default::default()
+    };
     // SAFETY: path and security descriptor remain live for this call. The protected DACL grants
     // full control to this account and LocalSystem, and propagates only to children.
     let created = unsafe { CreateDirectoryW(path_wide.as_ptr(), &attributes) };
@@ -2851,20 +2911,36 @@ fn is_inside_or_equal(candidate: &Path, containing: &Path) -> Result<bool> {
     )
 }
 
-fn finish_preview(
-    map: &[Mapping],
+struct PreviewFinishInput<'a> {
+    map: &'a [Mapping],
     reset: bool,
     root: Option<PathBuf>,
     include_music: bool,
     allow_existing_content: bool,
     verified_sync_root: bool,
     targets: BTreeMap<String, PathBuf>,
-    values: &BTreeMap<String, StoredFolderValue>,
+    values: &'a BTreeMap<String, StoredFolderValue>,
     registered: Vec<String>,
     root_registered: Option<bool>,
     registration_ok: bool,
-    recovery: &Path,
-) -> Result<FolderPreview> {
+    recovery: &'a Path,
+}
+
+fn finish_preview(input: PreviewFinishInput<'_>) -> Result<FolderPreview> {
+    let PreviewFinishInput {
+        map,
+        reset,
+        root,
+        include_music,
+        allow_existing_content,
+        verified_sync_root,
+        targets,
+        values,
+        registered,
+        root_registered,
+        registration_ok,
+        recovery,
+    } = input;
     let rows = make_preview_rows(map, include_music, &targets, values)?;
     let mut warnings = Vec::new();
     let mut destinations = BTreeSet::new();
@@ -3000,7 +3076,7 @@ fn preview(
         };
     }
 
-    finish_preview(
+    finish_preview(PreviewFinishInput {
         map,
         reset,
         root,
@@ -3008,12 +3084,12 @@ fn preview(
         allow_existing_content,
         verified_sync_root,
         targets,
-        &values,
+        values: &values,
         registered,
         root_registered,
         registration_ok,
-        &recovery,
-    )
+        recovery: &recovery,
+    })
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -3121,6 +3197,16 @@ const FILE_ATTRIBUTE_ENCRYPTED: u32 = 0x4000;
 
 fn cloud_file_reparse_tag(path: &Path) -> Result<u32> {
     let name = wide(&text(path)?);
+    let attributes = unsafe { GetFileAttributesW(name.as_ptr()) };
+    if attributes == INVALID_FILE_ATTRIBUTES {
+        return Err(format!(
+            "Cannot inspect file attributes (Windows error {}).",
+            unsafe { GetLastError() }
+        ));
+    }
+    if attributes & FILE_ATTRIBUTE_REPARSE_POINT == 0 {
+        return Ok(0);
+    }
     // SAFETY: the path is a validated, NUL-terminated UTF-16 string. OPEN_REPARSE_POINT
     // asks for metadata about the link itself; BACKUP_SEMANTICS also permits directories.
     let handle = unsafe {
@@ -3156,17 +3242,50 @@ fn cloud_file_reparse_tag(path: &Path) -> Result<u32> {
     } else {
         None
     };
-    // SAFETY: handle is live and owned by this function.
-    unsafe { CloseHandle(handle) };
     if let Some(error) = error {
+        // SAFETY: handle is live and owned by this function.
+        unsafe { CloseHandle(handle) };
         return Err(format!(
             "Cannot inspect reparse tag (Windows error {error})."
         ));
     }
-    if info.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT == 0 {
-        return Ok(0);
+    if info.ReparseTag != 0 {
+        // SAFETY: handle is live and owned by this function.
+        unsafe { CloseHandle(handle) };
+        return Ok(info.ReparseTag);
     }
-    Ok(info.ReparseTag)
+
+    const FSCTL_GET_REPARSE_POINT: u32 = 0x0009_00A8;
+    let mut reparse_data = vec![0u8; 16 * 1024];
+    let mut returned = 0u32;
+    // SAFETY: the handle targets the reparse point itself, the output buffer is writable and
+    // large enough for MAXIMUM_REPARSE_DATA_BUFFER_SIZE, and the synchronous call has no OVERLAPPED.
+    let ok = unsafe {
+        DeviceIoControl(
+            handle,
+            FSCTL_GET_REPARSE_POINT,
+            std::ptr::null(),
+            0,
+            reparse_data.as_mut_ptr().cast(),
+            reparse_data.len() as u32,
+            &mut returned,
+            std::ptr::null_mut(),
+        )
+    };
+    let error = if ok == 0 {
+        Some(unsafe { GetLastError() })
+    } else {
+        None
+    };
+    // SAFETY: handle is live and owned by this function.
+    unsafe { CloseHandle(handle) };
+    if let Some(error) = error {
+        return Err(format!("Cannot read reparse data (Windows error {error})."));
+    }
+    if returned < std::mem::size_of::<u32>() as u32 {
+        return Err("Windows returned an incomplete reparse data buffer.".into());
+    }
+    Ok(u32::from_le_bytes(reparse_data[..4].try_into().unwrap()))
 }
 
 fn is_cloud_file_reparse_tag(tag: u32) -> bool {
@@ -3491,7 +3610,75 @@ fn stable_file_identity(
         && before.ftLastWriteTime.dwLowDateTime == after.ftLastWriteTime.dwLowDateTime
 }
 
-fn hydrate_placeholder_range(handle: HANDLE, offset: u64, length: u64) -> Result<()> {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HydrationStopReason {
+    Cancelled,
+    TimedOut,
+}
+
+fn hydration_stop_reason(cancelled: bool, elapsed: Duration) -> Option<HydrationStopReason> {
+    if cancelled {
+        Some(HydrationStopReason::Cancelled)
+    } else if elapsed >= CLOUD_HYDRATION_RANGE_TIMEOUT {
+        Some(HydrationStopReason::TimedOut)
+    } else {
+        None
+    }
+}
+
+fn finish_stopped_hydration(
+    handle: HANDLE,
+    overlapped: &windows_sys::Win32::System::IO::OVERLAPPED,
+) -> Result<()> {
+    // SAFETY: the handle and OVERLAPPED identify the one pending request started above. The
+    // structure remains live until GetOverlappedResult confirms completion.
+    let cancel_requested = unsafe { CancelIoEx(handle, overlapped) } != 0;
+    let cancel_error = if cancel_requested {
+        ERROR_SUCCESS
+    } else {
+        unsafe { GetLastError() }
+    };
+    let mut transferred = 0;
+    // CancelIoEx only requests cancellation. Keep the handle and OVERLAPPED alive until the
+    // provider completes or cancels the request, including the race where it finished first.
+    let completed = unsafe {
+        windows_sys::Win32::System::IO::GetOverlappedResult(handle, overlapped, &mut transferred, 1)
+    };
+    if completed == 0 {
+        let completion_error = unsafe { GetLastError() };
+        if completion_error != ERROR_OPERATION_ABORTED {
+            return Err(format!(
+                "Cloud Files hydration cleanup failed (cancel error {cancel_error}, completion error {completion_error})."
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn hydration_stop_error(reason: HydrationStopReason) -> String {
+    match reason {
+        HydrationStopReason::Cancelled => COPY_REVIEW_CANCELLED.into(),
+        HydrationStopReason::TimedOut => format!(
+            "Cloud Files hydration did not complete within {} seconds; the pending request was cancelled.",
+            CLOUD_HYDRATION_RANGE_TIMEOUT.as_secs()
+        ),
+    }
+}
+
+fn cloud_hydration_error(error: u32) -> String {
+    if error == ERROR_CLOUD_FILE_REQUEST_TIMEOUT {
+        "The Cloud Files provider did not supply this file before the request timed out (0x800701AA).".into()
+    } else {
+        format!("Cloud Files hydration failed (Windows error {error}).")
+    }
+}
+
+fn hydrate_placeholder_range(
+    handle: HANDLE,
+    offset: u64,
+    length: u64,
+    cancellation: Option<&CopyCancellation>,
+) -> Result<()> {
     let mut overlapped = windows_sys::Win32::System::IO::OVERLAPPED::default();
     overlapped.Anonymous.Anonymous.Offset = offset as u32;
     overlapped.Anonymous.Anonymous.OffsetHigh = (offset >> 32) as u32;
@@ -3507,22 +3694,42 @@ fn hydrate_placeholder_range(handle: HANDLE, offset: u64, length: u64) -> Result
         )
     };
     if status == 0x800703E5u32 as i32 {
-        let mut transferred = 0;
-        // SAFETY: this is the same handle and OVERLAPPED passed to CfHydratePlaceholder; waiting
-        // keeps both alive until the range operation is complete.
-        if unsafe {
-            windows_sys::Win32::System::IO::GetOverlappedResult(
-                handle,
-                &overlapped,
-                &mut transferred,
-                1,
-            )
-        } == 0
-        {
-            return Err(format!(
-                "Cloud Files hydration failed (Windows error {}).",
-                unsafe { GetLastError() }
-            ));
+        let started = Instant::now();
+        loop {
+            let mut transferred = 0;
+            // SAFETY: this is the same handle and OVERLAPPED passed to CfHydratePlaceholder.
+            // A non-waiting poll keeps cancellation and timeout checks responsive.
+            if unsafe {
+                windows_sys::Win32::System::IO::GetOverlappedResult(
+                    handle,
+                    &overlapped,
+                    &mut transferred,
+                    0,
+                )
+            } != 0
+            {
+                break;
+            }
+            let error = unsafe { GetLastError() };
+            if error != ERROR_IO_INCOMPLETE {
+                return Err(cloud_hydration_error(error));
+            }
+            let cancel_check = cancellation.map(copy_cancellation_requested).transpose();
+            let (cancelled, cancellation_error) = match cancel_check {
+                Ok(value) => (value.unwrap_or(false), None),
+                Err(error) => (true, Some(error)),
+            };
+            if let Some(reason) = hydration_stop_reason(cancelled, started.elapsed()) {
+                if let Some(error) = cancellation_error {
+                    finish_stopped_hydration(handle, &overlapped)?;
+                    return Err(format!(
+                        "Could not check the copy cancellation channel ({error})."
+                    ));
+                }
+                finish_stopped_hydration(handle, &overlapped)?;
+                return Err(hydration_stop_error(reason));
+            }
+            std::thread::sleep(CLOUD_HYDRATION_POLL_INTERVAL);
         }
     } else if status < 0 {
         return Err(format!(
@@ -3548,7 +3755,7 @@ fn hydrate_cloud_placeholder(
             return Err(COPY_REVIEW_CANCELLED.into());
         }
         let length = RANGE_BYTES.min(size - offset);
-        hydrate_placeholder_range(handle, offset, length)?;
+        hydrate_placeholder_range(handle, offset, length, cancellation)?;
         offset += length;
     }
     Ok(())
@@ -4490,13 +4697,17 @@ fn run(input: impl Read, output: &mut impl Write) -> Result<bool> {
                 let Some(fresh) = copy_review_cancellable(
                     &map,
                     &root,
-                    reset_to_defaults,
-                    include_music,
-                    verified_sync_root,
-                    &folder_paths,
-                    true,
-                    Some(&cancellation),
-                    Some(output),
+                    CopyReviewOptions {
+                        reset_to_defaults,
+                        include_music,
+                        verified_sync_root,
+                        folder_paths: &folder_paths,
+                        applying: true,
+                    },
+                    CopyReviewRuntime {
+                        cancellation: Some(&cancellation),
+                        progress: Some(output),
+                    },
                 )?
                 else {
                     return Ok(
@@ -4793,10 +5004,12 @@ fn run(input: impl Read, output: &mut impl Write) -> Result<bool> {
 
 fn main() {
     let mut output = io::BufWriter::new(io::stdout().lock());
-    let result = if std::env::args_os().len() != 1 {
-        Err("Use one versioned JSON request on standard input; command-line actions are not supported.".into())
-    } else {
-        run(io::stdin().lock(), &mut output)
+    let result = match PlaceholderCompatibilityMode::expose() {
+        Err(error) => Err(error),
+        Ok(_placeholder_mode) if std::env::args_os().len() != 1 => {
+            Err("Use one versioned JSON request on standard input; command-line actions are not supported.".into())
+        }
+        Ok(_placeholder_mode) => run(io::stdin().lock(), &mut output),
     };
     match result {
         Err(error) => {
@@ -5696,7 +5909,7 @@ mod tests {
         ];
         for request in requests {
             let mut output = Vec::new();
-            assert_eq!(run(request.as_bytes(), &mut output).unwrap(), false);
+            assert!(!run(request.as_bytes(), &mut output).unwrap());
             let records: Vec<serde_json::Value> = String::from_utf8(output)
                 .unwrap()
                 .lines()
@@ -5747,7 +5960,7 @@ mod tests {
             2
         );
 
-        let mut invalid = vec![valid];
+        let mut invalid = [valid];
         let mut duplicate = invalid[0].values[0].clone();
         duplicate.name = "personal".into();
         invalid[0].values.push(duplicate);
@@ -6111,8 +6324,51 @@ mod tests {
     }
 
     #[test]
+    fn hydration_wait_stops_for_cancel_or_range_timeout() {
+        assert_eq!(
+            hydration_stop_reason(
+                false,
+                CLOUD_HYDRATION_RANGE_TIMEOUT - Duration::from_millis(1)
+            ),
+            None
+        );
+        assert_eq!(
+            hydration_stop_reason(false, CLOUD_HYDRATION_RANGE_TIMEOUT),
+            Some(HydrationStopReason::TimedOut)
+        );
+        assert_eq!(
+            hydration_stop_reason(true, Duration::ZERO),
+            Some(HydrationStopReason::Cancelled)
+        );
+        assert_eq!(
+            hydration_stop_reason(true, CLOUD_HYDRATION_RANGE_TIMEOUT),
+            Some(HydrationStopReason::Cancelled)
+        );
+        assert!(cloud_hydration_error(ERROR_CLOUD_FILE_REQUEST_TIMEOUT).contains("0x800701AA"));
+        assert!(cloud_hydration_error(ERROR_IO_INCOMPLETE).contains("Windows error 996"));
+    }
+
+    #[test]
+    fn placeholder_compatibility_scope_exposes_then_restores_thread_mode() {
+        let previous = unsafe { RtlQueryThreadPlaceholderCompatibilityMode() };
+        assert!(previous >= 0, "query returned native status {previous}");
+        {
+            let _scope = PlaceholderCompatibilityMode::expose().unwrap();
+            assert_eq!(
+                unsafe { RtlQueryThreadPlaceholderCompatibilityMode() },
+                PHCM_EXPOSE_PLACEHOLDERS
+            );
+        }
+        assert_eq!(
+            unsafe { RtlQueryThreadPlaceholderCompatibilityMode() },
+            previous
+        );
+    }
+
+    #[test]
     #[ignore = "reads the explicitly selected live Cloud Files file and may hydrate it"]
     fn explicit_live_cloud_file_hash_probe() {
+        let _placeholder_mode = PlaceholderCompatibilityMode::expose().unwrap();
         let path = PathBuf::from(
             std::env::var_os("ICLOUD_TEST_CLOUD_PATH")
                 .expect("Set ICLOUD_TEST_CLOUD_PATH to a dedicated cloud test file."),
@@ -6121,13 +6377,96 @@ mod tests {
             .expect("Set ICLOUD_TEST_CLOUD_SHA256 to the recorded test file hash.");
         let tag = cloud_file_reparse_tag(&path).unwrap();
         assert!(
-            tag == 0 || is_cloud_file_reparse_tag(tag),
-            "selected file reparse tag {tag:#010X} is neither a regular file nor a Cloud Files placeholder"
+            is_cloud_file_reparse_tag(tag),
+            "selected file is not recognized as a Cloud Files placeholder (tag {tag:#010X})"
         );
         let provider = CngSha256Provider::new().unwrap();
         let mut buffer = vec![0; 64 * 1024];
         let actual = hash(&path, &provider, &mut buffer).unwrap();
         assert_eq!(actual, expected, "live Cloud Files content hash changed");
+    }
+
+    #[test]
+    #[ignore = "copies the explicitly selected live Cloud Files test file to a temporary destination"]
+    fn explicit_live_cloud_file_copy_probe() {
+        let _placeholder_mode = PlaceholderCompatibilityMode::expose().unwrap();
+        struct RemoveDestination(PathBuf);
+        impl Drop for RemoveDestination {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+
+        let source = PathBuf::from(
+            std::env::var_os("ICLOUD_TEST_CLOUD_PATH")
+                .expect("Set ICLOUD_TEST_CLOUD_PATH to a dedicated cloud test file."),
+        );
+        let expected = std::env::var("ICLOUD_TEST_CLOUD_SHA256")
+            .expect("Set ICLOUD_TEST_CLOUD_SHA256 to the recorded test file hash.");
+        let path_text = text(&source).unwrap();
+        let win_attributes = unsafe { GetFileAttributesW(wide(&path_text).as_ptr()) };
+        let tag = cloud_file_reparse_tag(&source).unwrap();
+        let attributes = fs::symlink_metadata(&source).unwrap().file_attributes();
+        assert!(
+            is_cloud_file_reparse_tag(tag),
+            "selected file {} has tag {tag:#010X}, GetFileAttributesW {win_attributes:#010X}, and Rust metadata {attributes:#010X}, not a Cloud Files placeholder",
+            path_text
+        );
+        let destination_root = std::env::temp_dir().join(format!(
+            "ICloudLiveCopyProbe-{:032x}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&destination_root).unwrap();
+        let _cleanup = RemoveDestination(destination_root.clone());
+        let destination = destination_root.join(source.file_name().unwrap());
+        let provider = CngSha256Provider::new().unwrap();
+        let mut buffer = vec![0; 64 * 1024];
+        assert_eq!(
+            hash(&source, &provider, &mut buffer).unwrap(),
+            expected,
+            "live Cloud Files source hash changed before copy"
+        );
+
+        let entries = vec![Entry {
+            source: text(&source).unwrap(),
+            destination: text(&destination).unwrap(),
+            directory: false,
+            hash: Some(expected.clone()),
+            action: "Copy",
+        }];
+        let pairs = vec![CopyPair {
+            source: source.clone(),
+            destination: destination.clone(),
+        }];
+        let path_guards = copy_path_directory_identities(&pairs, &entries).unwrap();
+        let review = CopyReview {
+            operation: "copy_to_icloud",
+            root: String::new(),
+            reset_to_defaults: false,
+            include_music: false,
+            verified_sync_root: true,
+            review_gates_passed: true,
+            root_registered: Some(true),
+            registered_roots: Vec::new(),
+            folder_paths: BTreeMap::new(),
+            pairs,
+            entries,
+            path_guards,
+        };
+        let (_event_name, event_handle) = create_copy_cancel_event(false);
+        let cancellation = CopyCancellation(event_handle);
+        let mut output = Vec::new();
+        let result = apply_copy_review(&review, &cancellation, &mut output).unwrap();
+        assert_eq!(result["copied"], 1);
+        assert_eq!(result["completed"], 1);
+        assert_eq!(
+            hash(&destination, &provider, &mut buffer).unwrap(),
+            expected
+        );
+        assert_eq!(hash(&source, &provider, &mut buffer).unwrap(), expected);
     }
 
     #[test]
@@ -6277,20 +6616,20 @@ mod tests {
                     },
                 );
             }
-            let blocked = finish_preview(
-                &map,
-                false,
-                Some(root.clone()),
-                true,
-                false,
-                true,
-                targets.clone(),
-                &values,
-                Vec::new(),
-                Some(false),
-                true,
-                &recovery,
-            )
+            let blocked = finish_preview(PreviewFinishInput {
+                map: &map,
+                reset: false,
+                root: Some(root.clone()),
+                include_music: true,
+                allow_existing_content: false,
+                verified_sync_root: true,
+                targets: targets.clone(),
+                values: &values,
+                registered: Vec::new(),
+                root_registered: Some(false),
+                registration_ok: true,
+                recovery: &recovery,
+            })
             .unwrap();
             assert_eq!(
                 blocked.content_warnings.len(),
@@ -6303,20 +6642,20 @@ mod tests {
                 "preview must not create destination folders"
             );
 
-            let acknowledged = finish_preview(
-                &map,
-                false,
-                Some(root.clone()),
-                true,
-                true,
-                true,
-                targets.clone(),
-                &values,
-                Vec::new(),
-                Some(false),
-                true,
-                &recovery,
-            )
+            let acknowledged = finish_preview(PreviewFinishInput {
+                map: &map,
+                reset: false,
+                root: Some(root.clone()),
+                include_music: true,
+                allow_existing_content: true,
+                verified_sync_root: true,
+                targets: targets.clone(),
+                values: &values,
+                registered: Vec::new(),
+                root_registered: Some(false),
+                registration_ok: true,
+                recovery: &recovery,
+            })
             .unwrap();
             assert!(acknowledged.content_warnings.is_empty());
             assert!(
@@ -6324,20 +6663,20 @@ mod tests {
                 "verified no-registration acknowledgment plus content approval should unblock preview"
             );
 
-            let registered_elsewhere = finish_preview(
-                &map,
-                false,
-                Some(root),
-                true,
-                true,
-                true,
-                targets.clone(),
-                &values,
-                vec!["C:\\Other\\iCloudDrive".to_owned()],
-                Some(false),
-                false,
-                &recovery,
-            )
+            let registered_elsewhere = finish_preview(PreviewFinishInput {
+                map: &map,
+                reset: false,
+                root: Some(root),
+                include_music: true,
+                allow_existing_content: true,
+                verified_sync_root: true,
+                targets: targets.clone(),
+                values: &values,
+                registered: vec!["C:\\Other\\iCloudDrive".to_owned()],
+                root_registered: Some(false),
+                registration_ok: false,
+                recovery: &recovery,
+            })
             .unwrap();
             assert!(
                 !registered_elsewhere.review_gates_passed,
@@ -6349,39 +6688,39 @@ mod tests {
                 .join("ICloudFolderSettler")
                 .join("Recovery");
             assert!(
-                finish_preview(
-                    &map,
-                    false,
-                    Some(cloud.clone()),
-                    true,
-                    true,
-                    true,
-                    targets.clone(),
-                    &values,
-                    Vec::new(),
-                    Some(false),
-                    true,
-                    &nested_recovery,
-                )
+                finish_preview(PreviewFinishInput {
+                    map: &map,
+                    reset: false,
+                    root: Some(cloud.clone()),
+                    include_music: true,
+                    allow_existing_content: true,
+                    verified_sync_root: true,
+                    targets: targets.clone(),
+                    values: &values,
+                    registered: Vec::new(),
+                    root_registered: Some(false),
+                    registration_ok: true,
+                    recovery: &nested_recovery,
+                })
                 .is_err(),
                 "recovery storage inside a destination must be refused"
             );
             let nested_source_recovery = source.join("ICloudFolderSettler").join("Recovery");
             assert!(
-                finish_preview(
-                    &map,
-                    false,
-                    Some(cloud.clone()),
-                    true,
-                    true,
-                    true,
-                    targets.clone(),
-                    &values,
-                    Vec::new(),
-                    Some(false),
-                    true,
-                    &nested_source_recovery,
-                )
+                finish_preview(PreviewFinishInput {
+                    map: &map,
+                    reset: false,
+                    root: Some(cloud.clone()),
+                    include_music: true,
+                    allow_existing_content: true,
+                    verified_sync_root: true,
+                    targets: targets.clone(),
+                    values: &values,
+                    registered: Vec::new(),
+                    root_registered: Some(false),
+                    registration_ok: true,
+                    recovery: &nested_source_recovery,
+                })
                 .is_err(),
                 "recovery storage inside a source must be refused"
             );
@@ -6390,20 +6729,20 @@ mod tests {
             let mut obstructed_targets = targets;
             obstructed_targets.insert("Documents".to_owned(), blocker.join("Documents"));
             assert!(
-                finish_preview(
-                    &map,
-                    false,
-                    Some(cloud.clone()),
-                    true,
-                    true,
-                    true,
-                    obstructed_targets,
-                    &values,
-                    Vec::new(),
-                    Some(false),
-                    true,
-                    &recovery,
-                )
+                finish_preview(PreviewFinishInput {
+                    map: &map,
+                    reset: false,
+                    root: Some(cloud.clone()),
+                    include_music: true,
+                    allow_existing_content: true,
+                    verified_sync_root: true,
+                    targets: obstructed_targets,
+                    values: &values,
+                    registered: Vec::new(),
+                    root_registered: Some(false),
+                    registration_ok: true,
+                    recovery: &recovery,
+                })
                 .is_err(),
                 "a file in a destination's ancestor chain must be refused"
             );

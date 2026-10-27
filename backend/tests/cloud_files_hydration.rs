@@ -13,23 +13,25 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
     ptr,
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+    time::{Duration, Instant},
 };
 
 use windows_sys::Win32::{
     Foundation::{
-        CloseHandle, GENERIC_READ, GetLastError, HANDLE, INVALID_HANDLE_VALUE, STATUS_SUCCESS,
+        CloseHandle, ERROR_OPERATION_ABORTED, GENERIC_READ, GetLastError, HANDLE,
+        INVALID_HANDLE_VALUE, STATUS_SUCCESS,
     },
     Storage::{
         CloudFilters::{
             CF_CALLBACK_INFO, CF_CALLBACK_PARAMETERS, CF_CALLBACK_REGISTRATION,
-            CF_CALLBACK_TYPE_FETCH_DATA, CF_CALLBACK_TYPE_NONE, CF_CONNECT_FLAG_NONE,
-            CF_CREATE_FLAG_NONE, CF_FS_METADATA, CF_HYDRATE_FLAG_NONE, CF_HYDRATION_POLICY,
-            CF_HYDRATION_POLICY_MODIFIER_NONE, CF_HYDRATION_POLICY_PARTIAL, CF_INSYNC_POLICY_NONE,
-            CF_OPERATION_INFO, CF_OPERATION_PARAMETERS, CF_OPERATION_PARAMETERS_0_0,
-            CF_OPERATION_TRANSFER_DATA_FLAG_NONE, CF_OPERATION_TYPE_TRANSFER_DATA,
-            CF_PLACEHOLDER_CREATE_FLAG_MARK_IN_SYNC, CF_PLACEHOLDER_CREATE_INFO,
-            CF_POPULATION_POLICY, CF_POPULATION_POLICY_ALWAYS_FULL,
+            CF_CALLBACK_TYPE_CANCEL_FETCH_DATA, CF_CALLBACK_TYPE_FETCH_DATA, CF_CALLBACK_TYPE_NONE,
+            CF_CONNECT_FLAG_NONE, CF_CREATE_FLAG_NONE, CF_FS_METADATA, CF_HYDRATE_FLAG_NONE,
+            CF_HYDRATION_POLICY, CF_HYDRATION_POLICY_MODIFIER_NONE, CF_HYDRATION_POLICY_PARTIAL,
+            CF_INSYNC_POLICY_NONE, CF_OPERATION_INFO, CF_OPERATION_PARAMETERS,
+            CF_OPERATION_PARAMETERS_0_0, CF_OPERATION_TRANSFER_DATA_FLAG_NONE,
+            CF_OPERATION_TYPE_TRANSFER_DATA, CF_PLACEHOLDER_CREATE_FLAG_MARK_IN_SYNC,
+            CF_PLACEHOLDER_CREATE_INFO, CF_POPULATION_POLICY, CF_POPULATION_POLICY_ALWAYS_FULL,
             CF_POPULATION_POLICY_MODIFIER_NONE, CF_REGISTER_FLAG_MARK_IN_SYNC_ON_ROOT,
             CF_SYNC_POLICIES, CF_SYNC_REGISTRATION, CfConnectSyncRoot, CfCreatePlaceholders,
             CfDisconnectSyncRoot, CfExecute, CfHydratePlaceholder, CfRegisterSyncRoot,
@@ -41,7 +43,7 @@ use windows_sys::Win32::{
             FlushFileBuffers, GetFileInformationByHandle, OPEN_EXISTING, ReadFile, WriteFile,
         },
     },
-    System::IO::{GetOverlappedResult, OVERLAPPED},
+    System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED},
 };
 
 const RANGE_BYTES: usize = 64 * 1024;
@@ -89,6 +91,10 @@ unsafe extern "system" {
 
 struct ProviderContext {
     content: Vec<u8>,
+    block_fetch_until_cancel: bool,
+    fetch_started: AtomicBool,
+    cancel_received: AtomicBool,
+    cancel_callback_count: AtomicUsize,
     callback_count: AtomicUsize,
     maximum_transfer: AtomicUsize,
     last_required_offset: AtomicUsize,
@@ -122,6 +128,18 @@ unsafe fn transfer_requested_range(
         return;
     }
     let context = unsafe { &*(info.CallbackContext.cast::<ProviderContext>()) };
+    if context.block_fetch_until_cancel {
+        context.fetch_started.store(true, Ordering::Release);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !context.cancel_received.load(Ordering::Acquire) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        if context.cancel_received.load(Ordering::Acquire) {
+            return;
+        }
+        unsafe { complete_failed_request(info) };
+        return;
+    }
     let request = unsafe { parameters.Anonymous.FetchData };
     let start = request.RequiredFileOffset;
     let length = request.RequiredLength;
@@ -173,6 +191,26 @@ unsafe fn transfer_requested_range(
             .execute_failure
             .store(status as u32 as usize, Ordering::Relaxed);
     }
+}
+
+unsafe extern "system" fn cancel_fetch_data(
+    info: *const CF_CALLBACK_INFO,
+    _parameters: *const CF_CALLBACK_PARAMETERS,
+) {
+    if info.is_null() {
+        return;
+    }
+    let _ = std::panic::catch_unwind(|| unsafe {
+        let info = &*info;
+        if info.CallbackContext.is_null() {
+            return;
+        }
+        let context = &*(info.CallbackContext.cast::<ProviderContext>());
+        context
+            .cancel_callback_count
+            .fetch_add(1, Ordering::Relaxed);
+        context.cancel_received.store(true, Ordering::Release);
+    });
 }
 
 unsafe fn complete_failed_request(info: *const CF_CALLBACK_INFO) {
@@ -430,6 +468,10 @@ fn register_provider(root: PathBuf, context: &ProviderContext) -> RegisteredProv
             Callback: Some(fetch_data),
         },
         CF_CALLBACK_REGISTRATION {
+            Type: CF_CALLBACK_TYPE_CANCEL_FETCH_DATA,
+            Callback: Some(cancel_fetch_data),
+        },
+        CF_CALLBACK_REGISTRATION {
             Type: CF_CALLBACK_TYPE_NONE,
             Callback: None,
         },
@@ -513,6 +555,10 @@ fn create_relative_child(parent: HANDLE, name: &str, directory: bool) -> HANDLE 
 fn handle_relative_create_works_under_registered_cloud_root() {
     let context = ProviderContext {
         content: Vec::new(),
+        block_fetch_until_cancel: false,
+        fetch_started: AtomicBool::new(false),
+        cancel_received: AtomicBool::new(false),
+        cancel_callback_count: AtomicUsize::new(0),
         callback_count: AtomicUsize::new(0),
         maximum_transfer: AtomicUsize::new(0),
         last_required_offset: AtomicUsize::new(0),
@@ -597,6 +643,10 @@ fn explicit_hydration_uses_bounded_ranges_and_stable_file_identity() {
         .collect();
     let context = ProviderContext {
         content: content.clone(),
+        block_fetch_until_cancel: false,
+        fetch_started: AtomicBool::new(false),
+        cancel_received: AtomicBool::new(false),
+        cancel_callback_count: AtomicUsize::new(0),
         callback_count: AtomicUsize::new(0),
         maximum_transfer: AtomicUsize::new(0),
         last_required_offset: AtomicUsize::new(0),
@@ -647,6 +697,10 @@ fn cancellation_boundary_stops_before_the_next_hydration_range() {
         .collect();
     let context = ProviderContext {
         content: content.clone(),
+        block_fetch_until_cancel: false,
+        fetch_started: AtomicBool::new(false),
+        cancel_received: AtomicBool::new(false),
+        cancel_callback_count: AtomicUsize::new(0),
         callback_count: AtomicUsize::new(0),
         maximum_transfer: AtomicUsize::new(0),
         last_required_offset: AtomicUsize::new(0),
@@ -682,12 +736,88 @@ fn cancellation_boundary_stops_before_the_next_hydration_range() {
 
 #[test]
 #[ignore = "registers a disposable Cloud Files sync root; run via Test-NativeCloudFiles.ps1"]
+fn cancelling_pending_hydration_notifies_provider_and_completes_io() {
+    let content = vec![0x5A; 8 * 1024];
+    let context = ProviderContext {
+        content: content.clone(),
+        block_fetch_until_cancel: true,
+        fetch_started: AtomicBool::new(false),
+        cancel_received: AtomicBool::new(false),
+        cancel_callback_count: AtomicUsize::new(0),
+        callback_count: AtomicUsize::new(0),
+        maximum_transfer: AtomicUsize::new(0),
+        last_required_offset: AtomicUsize::new(0),
+        execute_failure: AtomicUsize::new(0),
+    };
+    let root = std::env::temp_dir().join(format!(
+        "icloud-cfapi-cancel-pending-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock should be after Unix epoch")
+            .as_nanos()
+    ));
+    let provider = register_provider(root.clone(), &context);
+    let placeholder = create_placeholder(&root, "cancel-pending.bin", &content);
+    let handle = open_overlapped(&placeholder);
+    let mut overlapped = OVERLAPPED::default();
+    let status =
+        unsafe { CfHydratePlaceholder(handle, 0, -1, CF_HYDRATE_FLAG_NONE, &mut overlapped) };
+    assert_eq!(
+        status, 0x800703E5u32 as i32,
+        "hydration should remain pending while the fixture provider holds its fetch"
+    );
+
+    let start_deadline = Instant::now() + Duration::from_secs(5);
+    while !context.fetch_started.load(Ordering::Acquire) && Instant::now() < start_deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(
+        context.fetch_started.load(Ordering::Acquire),
+        "provider did not enter the held fetch callback"
+    );
+
+    assert_ne!(
+        unsafe { CancelIoEx(handle, &overlapped) },
+        0,
+        "CancelIoEx failed (Windows error {})",
+        unsafe { GetLastError() }
+    );
+    let mut transferred = 0;
+    assert_eq!(
+        unsafe { GetOverlappedResult(handle, &overlapped, &mut transferred, 1) },
+        0,
+        "cancelled hydration unexpectedly completed successfully"
+    );
+    assert_eq!(
+        unsafe { GetLastError() },
+        ERROR_OPERATION_ABORTED,
+        "cancelled hydration returned an unexpected Windows error"
+    );
+
+    let cancel_deadline = Instant::now() + Duration::from_secs(5);
+    while !context.cancel_received.load(Ordering::Acquire) && Instant::now() < cancel_deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(context.cancel_received.load(Ordering::Acquire));
+    assert_eq!(context.cancel_callback_count.load(Ordering::Relaxed), 1);
+    assert_eq!(context.execute_failure.load(Ordering::Relaxed), 0);
+    unsafe { CloseHandle(handle) };
+    drop(provider);
+}
+
+#[test]
+#[ignore = "registers a disposable Cloud Files sync root; run via Test-NativeCloudFiles.ps1"]
 fn worker_plan_hydrates_and_hashes_a_cloud_placeholder() {
     let content: Vec<u8> = (0..CONTENT_BYTES)
         .map(|n| ((n * 31 + 7) % 251) as u8)
         .collect();
     let context = ProviderContext {
         content: content.clone(),
+        block_fetch_until_cancel: false,
+        fetch_started: AtomicBool::new(false),
+        cancel_received: AtomicBool::new(false),
+        cancel_callback_count: AtomicUsize::new(0),
         callback_count: AtomicUsize::new(0),
         maximum_transfer: AtomicUsize::new(0),
         last_required_offset: AtomicUsize::new(0),

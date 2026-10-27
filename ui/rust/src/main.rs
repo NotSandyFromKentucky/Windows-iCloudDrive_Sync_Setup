@@ -456,9 +456,9 @@ fn read_system_accent_color() -> u32 {
 /// Blend two BGR colors by the given weight (0-255, weight for color1).
 fn blend_bgr(c1: u32, c2: u32, w: u32) -> u32 {
     let w2 = 255 - w;
-    let r = (((c1 & 0xFF) as u32 * w + ((c2 & 0xFF) as u32) * w2) / 255) & 0xFF;
-    let g = (((((c1 >> 8) & 0xFF) as u32) * w + (((c2 >> 8) & 0xFF) as u32) * w2) / 255) & 0xFF;
-    let b = (((((c1 >> 16) & 0xFF) as u32) * w + (((c2 >> 16) & 0xFF) as u32) * w2) / 255) & 0xFF;
+    let r = (((c1 & 0xFF) * w + (c2 & 0xFF) * w2) / 255) & 0xFF;
+    let g = ((((c1 >> 8) & 0xFF) * w + ((c2 >> 8) & 0xFF) * w2) / 255) & 0xFF;
+    let b = ((((c1 >> 16) & 0xFF) * w + ((c2 >> 16) & 0xFF) * w2) / 255) & 0xFF;
     r | (g << 8) | (b << 16)
 }
 
@@ -1560,14 +1560,7 @@ fn operation(
         let bundled = source.join("RustUI/icloud-folder-worker.exe");
         if let Some(worker) = configured.or_else(|| bundled.is_file().then_some(bundled)) {
             return if options.copy() && matches!(phase.as_str(), "Preview" | "CopyPage") {
-                native_copy_preview(
-                    &options,
-                    &worker,
-                    &source,
-                    copy_page_offset,
-                    &stop,
-                    &sender,
-                )
+                native_copy_preview(&options, &worker, &source, copy_page_offset, &stop, &sender)
             } else if native_copy_apply_requested {
                 let cancellation = CancelEvent::new()?;
                 native_copy_apply(
@@ -1676,7 +1669,7 @@ fn operation(
         return Err("The result exceeded the 2 MiB output limit. The operation has finished; inspect recovery records before retrying changes.".into());
     }
     let output = String::from_utf8(output).map_err(|_| "Invalid UTF-8 result.")?;
-    let record=output.lines().filter_map(|line|line.strip_prefix("@@ICloudResult:")).last().ok_or_else(||format!("The operation ended without a complete result. Review recovery records before retrying. {}",String::from_utf8_lossy(&errors)))?;
+    let record=output.lines().filter_map(|line|line.strip_prefix("@@ICloudResult:")).next_back().ok_or_else(||format!("The operation ended without a complete result. Review recovery records before retrying. {}",String::from_utf8_lossy(&errors)))?;
     let mut result: WorkerResult = serde_json::from_str(record).map_err(|e| e.to_string())?;
     if Some(result.exit_code) != exit.code() {
         return Err(
@@ -3355,7 +3348,11 @@ impl State {
                     self.copy_reviewed = self.running_options.clone();
                     self.copy_review_token = report["ApprovalToken"].as_str().map(str::to_owned);
                     self.copy_page_next_offset = report["NextOffset"].as_u64().map(|v| v as usize);
-                    let first_row = if values.is_empty() { 0 } else { page_offset + 1 };
+                    let first_row = if values.is_empty() {
+                        0
+                    } else {
+                        page_offset + 1
+                    };
                     let last_row = page_offset + values.len();
                     set_text(
                         self.table_label,
@@ -3806,13 +3803,12 @@ impl State {
                     match result {
                         Ok(result) => {
                             if self.running_phase == "CopyPage" {
-                                let current_token = serde_json::from_str::<serde_json::Value>(
-                                    result.text.trim(),
-                                )
-                                .ok()
-                                .and_then(|report| {
-                                    report["ApprovalToken"].as_str().map(str::to_owned)
-                                });
+                                let current_token =
+                                    serde_json::from_str::<serde_json::Value>(result.text.trim())
+                                        .ok()
+                                        .and_then(|report| {
+                                            report["ApprovalToken"].as_str().map(str::to_owned)
+                                        });
                                 if current_token != self.copy_page_expected_token {
                                     self.reset_copy_review();
                                     self.reviewed = None;
