@@ -66,11 +66,13 @@ function Invoke-NativeBackend([string]$Worker,[string]$Request){
     $info.FileName=$Worker;$info.UseShellExecute=$false;$info.CreateNoWindow=$true
     $info.RedirectStandardInput=$true;$info.RedirectStandardOutput=$true;$info.RedirectStandardError=$true
     $info.StandardOutputEncoding=New-Object Text.UTF8Encoding($false)
+    $info.StandardInputEncoding=New-Object Text.UTF8Encoding($false)
     $process=[Diagnostics.Process]::Start($info)
     try{
         $stdout=$process.StandardOutput.ReadToEndAsync();$stderr=$process.StandardError.ReadToEndAsync()
-        $bytes=[Text.Encoding]::UTF8.GetBytes($Request)
-        $process.StandardInput.BaseStream.Write($bytes,0,$bytes.Length);$process.StandardInput.Close()
+        $process.StandardInput.Write($Request)
+        $process.StandardInput.Flush()
+        $process.StandardInput.Close()
         if(-not $process.WaitForExit(30000)){throw 'Native backend query timed out'}
         if($process.ExitCode -ne 0 -or $stderr.Result -ne ''){
             $stdoutText=[string]$stdout.Result;$stderrText=[string]$stderr.Result
