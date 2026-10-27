@@ -61,24 +61,6 @@ function Start-UIWithEnvironment([string]$Arguments,[hashtable]$Environment){
         foreach($name in $names){[Environment]::SetEnvironmentVariable($name,$previous[$name],'Process')}
     }
 }
-function Invoke-NativeBackend([string]$Worker,[string]$Request){
-    if([string]::IsNullOrWhiteSpace($Request)){throw 'Native backend test request is empty.'}
-    $previousEncoding=$OutputEncoding
-    try{
-        $OutputEncoding=New-Object Text.UTF8Encoding($false)
-        $raw=@($Request | & $Worker 2>&1)
-        $exitCode=$LASTEXITCODE
-        $nativeErrors=@($raw|Where-Object {$_ -is [System.Management.Automation.ErrorRecord]})
-        $stdoutText=(@($raw|Where-Object {$_ -isnot [System.Management.Automation.ErrorRecord]}|ForEach-Object {[string]$_}) -join [Environment]::NewLine)
-        $stderrText=(@($nativeErrors|ForEach-Object {[string]$_.ToString()}) -join [Environment]::NewLine)
-        if($exitCode -ne 0 -or $nativeErrors.Count -gt 0){
-            if($stdoutText.Length -gt 2000){$stdoutText=$stdoutText.Substring(0,2000)}
-            if($stderrText.Length -gt 2000){$stderrText=$stderrText.Substring(0,2000)}
-            throw ('Native backend default-path query failed (exit '+$exitCode+'). stderr: '+$stderrText+' stdout: '+$stdoutText)
-        }
-        return @($stdoutText -split '\r?\n'|Where-Object {$_}|ForEach-Object {$_|ConvertFrom-Json})
-    }finally{$OutputEncoding=$previousEncoding}
-}
 $fixture=Join-Path ([IO.Path]::GetTempPath()) ('ICloudRustUIFixture-'+[guid]::NewGuid().ToString('N'))
 $null=[IO.Directory]::CreateDirectory((Join-Path $fixture 'tools'))
 $accessibilityProbe=Join-Path $fixture 'RustUIAccessibilityProbe.exe'
@@ -330,10 +312,8 @@ try{
     $hadPersonal=$copyKey.GetValueNames() -contains 'Personal'
     $personalKind=$null;$personalValue=$null
     if($hadPersonal){$personalKind=$copyKey.GetValueKind('Personal');$personalValue=$copyKey.GetValue('Personal',$null,[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)}
-    $defaultRows=Invoke-NativeBackend $BackendWorkerPath '{"version":1,"operation":"defaults"}'
-    $documents=@($defaultRows|Where-Object {$_.type -eq 'defaults'}|ForEach-Object {$_.folders}|Where-Object folder -eq 'Documents')
-    Assert ($documents.Count -eq 1 -and $documents[0].path.StartsWith($env:USERPROFILE+'\',[StringComparison]::OrdinalIgnoreCase)) 'Windows default Documents path is unavailable or outside the disposable user profile'
-    $copyDestinationRoot=[string]$documents[0].path
+    $copyDestinationRoot=[Environment]::GetFolderPath([Environment+SpecialFolder]::MyDocuments)
+    Assert (-not [string]::IsNullOrWhiteSpace($copyDestinationRoot) -and $copyDestinationRoot.StartsWith($env:USERPROFILE+'\',[StringComparison]::OrdinalIgnoreCase)) 'Windows default Documents path is unavailable or outside the disposable user profile'
     $copyDestinationFile=Join-Path $copyDestinationRoot $copyName
     Assert (-not(Test-Path -LiteralPath $copyDestinationFile)) 'Unique Rust UI copy fixture destination already exists'
     $copyDestinationRootExisted=[IO.Directory]::Exists($copyDestinationRoot)
