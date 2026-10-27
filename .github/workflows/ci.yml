@@ -175,44 +175,68 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          $backend = ./tools/Build-NativeBackend.ps1 -Test
-          $ui = ./tools/Build-RustUI.ps1 -Test
-          ./tests/Test-RustUI.ps1 -WorkerPath $ui.WorkerPath -BackendWorkerPath $backend.WorkerPath -RunNativeIntegration -NoHiddenDesktop
-          ./tests/Test-NativeCloudFiles.ps1 -Snapshot $backend.Snapshot -NoHiddenDesktop
-          $package = ./tools/New-RustUIPackage.ps1 -BuildInfo (Join-Path $ui.Snapshot 'build-info.json') -BackendBuildInfo (Join-Path $backend.Snapshot 'build-info.json')
-          ./tests/Test-RustUIPackage.ps1 -PackageDirectory $package.Directory -RunNativeIntegration -NoHiddenDesktop
-          $env:CARGO_TARGET_DIR = Join-Path $backend.Snapshot 'target'
-          $env:ICLOUD_FOLDER_MAP_PATH = Join-Path $backend.Snapshot 'folder-map.json'
-          cargo fmt --manifest-path (Join-Path $backend.Snapshot 'Cargo.toml') -- --check
-          if ($LASTEXITCODE) { throw 'ARM64 backend formatting check failed.' }
-          cargo clippy --locked --manifest-path (Join-Path $backend.Snapshot 'Cargo.toml') --all-targets -- -D warnings
-          if ($LASTEXITCODE) { throw 'ARM64 backend Clippy failed.' }
-          $env:CARGO_TARGET_DIR = Join-Path $ui.Snapshot 'target'
-          $env:ICLOUD_FOLDER_MAP_PATH = Join-Path $ui.Snapshot 'folder-map.json'
-          cargo fmt --manifest-path (Join-Path $ui.Snapshot 'Cargo.toml') -- --check
-          if ($LASTEXITCODE) { throw 'ARM64 UI formatting check failed.' }
-          cargo clippy --locked --manifest-path (Join-Path $ui.Snapshot 'Cargo.toml') --all-targets -- -D warnings
-          if ($LASTEXITCODE) { throw 'ARM64 UI Clippy failed.' }
-          function Assert-Arm64Pe([string]$Path) {
-            $stream = [IO.File]::OpenRead($Path)
-            try {
-              $reader = New-Object IO.BinaryReader($stream)
-              $stream.Position = 0x3c
-              $peOffset = $reader.ReadInt32()
-              $stream.Position = $peOffset
-              if ($reader.ReadUInt32() -ne 0x00004550 -or $reader.ReadUInt16() -ne 0xAA64) {
-                throw 'A Rust release executable is not a valid ARM64 PE.'
-              }
-            } finally { $stream.Dispose() }
+          $diagnosticPath = Join-Path $env:RUNNER_TEMP 'rust-arm64-failure.txt'
+          $stage = 'backend build and unit tests'
+          try {
+            $backend = ./tools/Build-NativeBackend.ps1 -Test
+            $stage = 'UI build and unit tests'
+            $ui = ./tools/Build-RustUI.ps1 -Test
+            $stage = 'visible Rust UI parity and guarded registry integration'
+            ./tests/Test-RustUI.ps1 -WorkerPath $ui.WorkerPath -BackendWorkerPath $backend.WorkerPath -RunNativeIntegration -NoHiddenDesktop
+            $stage = 'synthetic Cloud Files provider integration'
+            ./tests/Test-NativeCloudFiles.ps1 -Snapshot $backend.Snapshot -NoHiddenDesktop
+            $stage = 'preview package build and install/launch fixtures'
+            $package = ./tools/New-RustUIPackage.ps1 -BuildInfo (Join-Path $ui.Snapshot 'build-info.json') -BackendBuildInfo (Join-Path $backend.Snapshot 'build-info.json')
+            ./tests/Test-RustUIPackage.ps1 -PackageDirectory $package.Directory -RunNativeIntegration -NoHiddenDesktop
+            $stage = 'backend formatting and Clippy'
+            $env:CARGO_TARGET_DIR = Join-Path $backend.Snapshot 'target'
+            $env:ICLOUD_FOLDER_MAP_PATH = Join-Path $backend.Snapshot 'folder-map.json'
+            cargo fmt --manifest-path (Join-Path $backend.Snapshot 'Cargo.toml') -- --check
+            if ($LASTEXITCODE) { throw 'ARM64 backend formatting check failed.' }
+            cargo clippy --locked --manifest-path (Join-Path $backend.Snapshot 'Cargo.toml') --all-targets -- -D warnings
+            if ($LASTEXITCODE) { throw 'ARM64 backend Clippy failed.' }
+            $stage = 'UI formatting and Clippy'
+            $env:CARGO_TARGET_DIR = Join-Path $ui.Snapshot 'target'
+            $env:ICLOUD_FOLDER_MAP_PATH = Join-Path $ui.Snapshot 'folder-map.json'
+            cargo fmt --manifest-path (Join-Path $ui.Snapshot 'Cargo.toml') -- --check
+            if ($LASTEXITCODE) { throw 'ARM64 UI formatting check failed.' }
+            cargo clippy --locked --manifest-path (Join-Path $ui.Snapshot 'Cargo.toml') --all-targets -- -D warnings
+            if ($LASTEXITCODE) { throw 'ARM64 UI Clippy failed.' }
+            $stage = 'ARM64 PE architecture and worker protocol'
+            function Assert-Arm64Pe([string]$Path) {
+              $stream = [IO.File]::OpenRead($Path)
+              try {
+                $reader = New-Object IO.BinaryReader($stream)
+                $stream.Position = 0x3c
+                $peOffset = $reader.ReadInt32()
+                $stream.Position = $peOffset
+                if ($reader.ReadUInt32() -ne 0x00004550 -or $reader.ReadUInt16() -ne 0xAA64) {
+                  throw 'A Rust release executable is not a valid ARM64 PE.'
+                }
+              } finally { $stream.Dispose() }
+            }
+            Assert-Arm64Pe $backend.WorkerPath
+            Assert-Arm64Pe $ui.WorkerPath
+            $records = @('{"version":1,"operation":"metadata"}' | & $backend.WorkerPath | ForEach-Object { $_ | ConvertFrom-Json })
+            if ($LASTEXITCODE -ne 0 -or $records.Count -lt 2 -or $records[0].type -ne 'metadata' -or
+                $records[0].mappings.Count -ne 13 -or $records[-1].type -ne 'result' -or $records[-1].ok -ne $true) {
+              throw 'The native ARM64 worker metadata protocol check failed.'
+            }
+            Write-Output 'PASS: native ARM64 backend/UI unit suites, release PE architecture and read-only worker protocol.'
+          } catch {
+            $detail = "Failed stage: $stage`nMessage: $($_.Exception.Message)`nScript: $($_.ScriptStackTrace)"
+            [IO.File]::WriteAllText($diagnosticPath, $detail, (New-Object Text.UTF8Encoding($false)))
+            [IO.File]::AppendAllText($env:GITHUB_STEP_SUMMARY, "### ARM64 Rust diagnostic`n````text`n$detail`n`````n", (New-Object Text.UTF8Encoding($false)))
+            throw
           }
-          Assert-Arm64Pe $backend.WorkerPath
-          Assert-Arm64Pe $ui.WorkerPath
-          $records = @('{"version":1,"operation":"metadata"}' | & $backend.WorkerPath | ForEach-Object { $_ | ConvertFrom-Json })
-          if ($LASTEXITCODE -ne 0 -or $records.Count -lt 2 -or $records[0].type -ne 'metadata' -or
-              $records[0].mappings.Count -ne 13 -or $records[-1].type -ne 'result' -or $records[-1].ok -ne $true) {
-            throw 'The native ARM64 worker metadata protocol check failed.'
-          }
-          Write-Output 'PASS: native ARM64 backend/UI unit suites, release PE architecture and read-only worker protocol.'
+      - name: Retain ARM64 Rust failure summary
+        if: always() && steps.rust_build.outcome == 'failure'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: rust-arm64-failure-summary
+          path: ${{ runner.temp }}/rust-arm64-failure.txt
+          if-no-files-found: warn
+          retention-days: 3
   native-rust-x64-preview:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.rust_preview_x64_only == true }}
     name: Rust x64 preview package install and launch
@@ -241,47 +265,72 @@ jobs:
           rustc --version
           cargo --version
       - name: Build, install and verify the x64 Rust preview package
+        id: rust_x64_validation
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          $backend = ./tools/Build-NativeBackend.ps1 -Test
-          $ui = ./tools/Build-RustUI.ps1 -Test
-          ./tests/Test-RustUI.ps1 -WorkerPath $ui.WorkerPath -BackendWorkerPath $backend.WorkerPath -RunNativeIntegration -NoHiddenDesktop
-          ./tests/Test-NativeCloudFiles.ps1 -Snapshot $backend.Snapshot -NoHiddenDesktop
-          $package = ./tools/New-RustUIPackage.ps1 -BuildInfo (Join-Path $ui.Snapshot 'build-info.json') -BackendBuildInfo (Join-Path $backend.Snapshot 'build-info.json')
-          ./tests/Test-RustUIPackage.ps1 -PackageDirectory $package.Directory -RunNativeIntegration -NoHiddenDesktop
-          $env:CARGO_TARGET_DIR = Join-Path $backend.Snapshot 'target'
-          $env:ICLOUD_FOLDER_MAP_PATH = Join-Path $backend.Snapshot 'folder-map.json'
-          cargo fmt --manifest-path (Join-Path $backend.Snapshot 'Cargo.toml') -- --check
-          if ($LASTEXITCODE) { throw 'x64 backend formatting check failed.' }
-          cargo clippy --locked --manifest-path (Join-Path $backend.Snapshot 'Cargo.toml') --all-targets -- -D warnings
-          if ($LASTEXITCODE) { throw 'x64 backend Clippy failed.' }
-          $env:CARGO_TARGET_DIR = Join-Path $ui.Snapshot 'target'
-          $env:ICLOUD_FOLDER_MAP_PATH = Join-Path $ui.Snapshot 'folder-map.json'
-          cargo fmt --manifest-path (Join-Path $ui.Snapshot 'Cargo.toml') -- --check
-          if ($LASTEXITCODE) { throw 'x64 UI formatting check failed.' }
-          cargo clippy --locked --manifest-path (Join-Path $ui.Snapshot 'Cargo.toml') --all-targets -- -D warnings
-          if ($LASTEXITCODE) { throw 'x64 UI Clippy failed.' }
-          function Assert-X64Pe([string]$Path) {
-            $stream = [IO.File]::OpenRead($Path)
-            try {
-              $reader = New-Object IO.BinaryReader($stream)
-              $stream.Position = 0x3c
-              $peOffset = $reader.ReadInt32()
-              $stream.Position = $peOffset
-              if ($reader.ReadUInt32() -ne 0x00004550 -or $reader.ReadUInt16() -ne 0x8664) {
-                throw "A Rust release executable is not a valid x64 PE: $Path"
-              }
-            } finally { $stream.Dispose() }
+          $diagnosticPath = Join-Path $env:RUNNER_TEMP 'rust-x64-failure.txt'
+          $stage = 'backend build and unit tests'
+          try {
+            $backend = ./tools/Build-NativeBackend.ps1 -Test
+            $stage = 'UI build and unit tests'
+            $ui = ./tools/Build-RustUI.ps1 -Test
+            $stage = 'visible Rust UI parity and guarded registry integration'
+            ./tests/Test-RustUI.ps1 -WorkerPath $ui.WorkerPath -BackendWorkerPath $backend.WorkerPath -RunNativeIntegration -NoHiddenDesktop
+            $stage = 'synthetic Cloud Files provider integration'
+            ./tests/Test-NativeCloudFiles.ps1 -Snapshot $backend.Snapshot -NoHiddenDesktop
+            $stage = 'preview package build and install/launch/tamper fixtures'
+            $package = ./tools/New-RustUIPackage.ps1 -BuildInfo (Join-Path $ui.Snapshot 'build-info.json') -BackendBuildInfo (Join-Path $backend.Snapshot 'build-info.json')
+            ./tests/Test-RustUIPackage.ps1 -PackageDirectory $package.Directory -RunNativeIntegration -NoHiddenDesktop
+            $stage = 'backend formatting and Clippy'
+            $env:CARGO_TARGET_DIR = Join-Path $backend.Snapshot 'target'
+            $env:ICLOUD_FOLDER_MAP_PATH = Join-Path $backend.Snapshot 'folder-map.json'
+            cargo fmt --manifest-path (Join-Path $backend.Snapshot 'Cargo.toml') -- --check
+            if ($LASTEXITCODE) { throw 'x64 backend formatting check failed.' }
+            cargo clippy --locked --manifest-path (Join-Path $backend.Snapshot 'Cargo.toml') --all-targets -- -D warnings
+            if ($LASTEXITCODE) { throw 'x64 backend Clippy failed.' }
+            $stage = 'UI formatting and Clippy'
+            $env:CARGO_TARGET_DIR = Join-Path $ui.Snapshot 'target'
+            $env:ICLOUD_FOLDER_MAP_PATH = Join-Path $ui.Snapshot 'folder-map.json'
+            cargo fmt --manifest-path (Join-Path $ui.Snapshot 'Cargo.toml') -- --check
+            if ($LASTEXITCODE) { throw 'x64 UI formatting check failed.' }
+            cargo clippy --locked --manifest-path (Join-Path $ui.Snapshot 'Cargo.toml') --all-targets -- -D warnings
+            if ($LASTEXITCODE) { throw 'x64 UI Clippy failed.' }
+            $stage = 'x64 PE architecture and worker protocol'
+            function Assert-X64Pe([string]$Path) {
+              $stream = [IO.File]::OpenRead($Path)
+              try {
+                $reader = New-Object IO.BinaryReader($stream)
+                $stream.Position = 0x3c
+                $peOffset = $reader.ReadInt32()
+                $stream.Position = $peOffset
+                if ($reader.ReadUInt32() -ne 0x00004550 -or $reader.ReadUInt16() -ne 0x8664) {
+                  throw "A Rust release executable is not a valid x64 PE: $Path"
+                }
+              } finally { $stream.Dispose() }
+            }
+            Assert-X64Pe $backend.WorkerPath
+            Assert-X64Pe $ui.WorkerPath
+            $records = @('{"version":1,"operation":"metadata"}' | & $backend.WorkerPath | ForEach-Object { $_ | ConvertFrom-Json })
+            if ($LASTEXITCODE -ne 0 -or $records.Count -lt 2 -or $records[0].type -ne 'metadata' -or
+                $records[0].mappings.Count -ne 13 -or $records[-1].type -ne 'result' -or $records[-1].ok -ne $true) {
+              throw 'The native x64 worker metadata protocol check failed.'
+            }
+            Write-Output 'PASS: x64 backend/UI unit suites, visible preview install/launch fixture, package integrity, PE architecture and read-only worker protocol.'
+          } catch {
+            $detail = "Failed stage: $stage`nMessage: $($_.Exception.Message)`nScript: $($_.ScriptStackTrace)"
+            [IO.File]::WriteAllText($diagnosticPath, $detail, (New-Object Text.UTF8Encoding($false)))
+            [IO.File]::AppendAllText($env:GITHUB_STEP_SUMMARY, "### x64 Rust diagnostic`n````text`n$detail`n`````n", (New-Object Text.UTF8Encoding($false)))
+            throw
           }
-          Assert-X64Pe $backend.WorkerPath
-          Assert-X64Pe $ui.WorkerPath
-          $records = @('{"version":1,"operation":"metadata"}' | & $backend.WorkerPath | ForEach-Object { $_ | ConvertFrom-Json })
-          if ($LASTEXITCODE -ne 0 -or $records.Count -lt 2 -or $records[0].type -ne 'metadata' -or
-              $records[0].mappings.Count -ne 13 -or $records[-1].type -ne 'result' -or $records[-1].ok -ne $true) {
-            throw 'The native x64 worker metadata protocol check failed.'
-          }
-          Write-Output 'PASS: x64 backend/UI unit suites, visible preview install/launch fixture, package integrity, PE architecture and read-only worker protocol.'
+      - name: Retain x64 Rust failure summary
+        if: always() && steps.rust_x64_validation.outcome == 'failure'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: rust-x64-failure-summary
+          path: ${{ runner.temp }}/rust-x64-failure.txt
+          if-no-files-found: warn
+          retention-days: 3
   native-ui:
     if: ${{ github.event_name != 'workflow_dispatch' || (inputs.arm64_rust_only != true && inputs.rust_preview_x64_only != true) }}
     name: Native WinUI build and hidden-desktop fixtures
